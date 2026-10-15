@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Ruins Runner</title>
+  <meta name="description" content="A browser-based 3D endless runner: escape the Demon Monkeys through ancient jungle ruins." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Cinzel:wght@700;900&family=Nunito:wght@400;700;800&display=swap" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div id="game-root">
+    <!-- WebGL render target -->
+    <canvas id="game-canvas"></canvas>
+
+    <!-- ============================ HUD ============================ -->
+    <div id="hud" class="hidden">
+      <div id="danger-vignette"></div>
+
+      <div class="hud-left">
+        <div class="hud-label">SCORE</div>
+        <div id="hud-score">0</div>
+        <div class="hud-sub"><span id="hud-distance">0</span> m · <span id="hud-mult">x1</span></div>
+      </div>
+
+      <div class="hud-right">
+        <div class="coin-box"><span class="coin-icon"></span><span id="hud-coins">0</span></div>
+        <button id="btn-pause" class="pause-btn" data-action="pause" title="Pause (Esc / P)" aria-label="Pause">❚❚</button>
+      </div>
+
+      <div id="hud-powerups">
+        <div class="pu hidden" id="pu-magnet"><span class="pu-icon">🧲</span><div class="pu-bar"><i></i></div></div>
+        <div class="pu hidden" id="pu-boost"><span class="pu-icon">⚡</span><div class="pu-bar"><i></i></div></div>
+        <div class="pu hidden" id="pu-shield"><span class="pu-icon">🛡️</span><div class="pu-label">READY</div></div>
+      </div>
+
+      <div id="meter-wrap">
+        <div id="meter-label">POWER · <span id="meter-power-name">BOOST</span></div>
+        <div id="meter"><div id="meter-fill"></div></div>
+        <div id="meter-hint">PRESS SPACE!</div>
+      </div>
+
+      <div id="toast"></div>
+    </div>
+
+    <!-- ========================= START MENU ========================= -->
+    <div id="screen-start" class="screen">
+      <div class="panel menu-panel">
+        <h1 class="title">RUINS<span>RUNNER</span></h1>
+        <p class="tagline">Steal the idol. Outrun the Demon Monkeys.</p>
+        <div class="menu-stats">
+          <div><small>BEST</small><b id="menu-best">0</b></div>
+          <div><small>COINS</small><b id="menu-bank">0</b></div>
+        </div>
+        <div class="menu-buttons">
+          <button class="btn btn-primary" data-action="start">▶ Start Game</button>
+          <button class="btn" data-action="characters">Character Select</button>
+          <button class="btn" data-action="upgrades">Power-up Upgrades</button>
+          <button class="btn" data-action="scores">High Scores</button>
+        </div>
+        <div class="controls">
+          <div><kbd>↑</kbd><kbd>W</kbd><span>Jump</span></div>
+          <div><kbd>↓</kbd><kbd>S</kbd><span>Slide</span></div>
+          <div><kbd>←</kbd><kbd>→</kbd><span>Turn at corners</span></div>
+          <div><kbd>A</kbd><kbd>D</kbd><span>Hold to lean / shift lanes</span></div>
+          <div><kbd>Space</kbd><span>Power-up (meter full) / Pause</span></div>
+          <div><kbd>Esc</kbd><kbd>M</kbd><span>Pause · Mute</span></div>
+        </div>
+        <p class="hint">Press <kbd>Enter</kbd> to start</p>
+      </div>
+    </div>
+
+    <!-- ====================== CHARACTER SELECT ====================== -->
+    <div id="screen-characters" class="screen hidden">
+      <div class="panel wide-panel">
+        <h2>Choose Your Runner</h2>
+        <p class="sub">Bank: <b class="bank-amount">0</b> coins</p>
+        <div id="char-list" class="card-grid"></div>
+        <button class="btn" data-action="back">← Back</button>
+      </div>
+    </div>
+
+    <!-- ========================== UPGRADES ========================== -->
+    <div id="screen-upgrades" class="screen hidden">
+      <div class="panel wide-panel">
+        <h2>Power-up Upgrades</h2>
+        <p class="sub">Bank: <b class="bank-amount">0</b> coins</p>
+        <div id="upgrade-list"></div>
+        <h3>Meter Power <small>(activated with Space when the meter is full)</small></h3>
+        <div id="meter-power-select" class="seg-select"></div>
+        <button class="btn" data-action="back">← Back</button>
+      </div>
+    </div>
+
+    <!-- ========================= HIGH SCORES ======================== -->
+    <div id="screen-scores" class="screen hidden">
+      <div class="panel">
+        <h2>High Scores</h2>
+        <table class="score-table">
+          <thead><tr><th>#</th><th>Score</th><th>Distance</th><th>Coins</th><th>Runner</th></tr></thead>
+          <tbody id="score-body"></tbody>
+        </table>
+        <div class="row-buttons">
+          <button class="btn" data-action="back">← Back</button>
+          <button class="btn btn-danger" data-action="reset-scores">Reset Scores</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============================ PAUSE =========================== -->
+    <div id="screen-pause" class="screen hidden">
+      <div class="panel">
+        <h2>Paused</h2>
+        <div class="menu-buttons">
+          <button class="btn btn-primary" data-action="resume">▶ Resume</button>
+          <button class="btn" data-action="restart">↻ Restart Run</button>
+          <button class="btn" data-action="toggle-mute" id="btn-mute">🔊 Sound: On</button>
+          <button class="btn" data-action="menu">Main Menu</button>
+        </div>
+        <p class="hint">Press <kbd>Space</kbd> or <kbd>Esc</kbd> to resume</p>
+      </div>
+    </div>
+
+    <!-- ========================== GAME OVER ========================= -->
+    <div id="screen-gameover" class="screen hidden">
+      <div class="panel">
+        <h2 id="go-title">Caught!</h2>
+        <p class="sub" id="go-reason"></p>
+        <div id="go-newbest" class="badge hidden">★ NEW HIGH SCORE ★</div>
+        <div class="summary">
+          <div><small>SCORE</small><b id="go-score">0</b></div>
+          <div><small>DISTANCE</small><b id="go-distance">0 m</b></div>
+          <div><small>COINS</small><b id="go-coins">0</b></div>
+          <div><small>BEST</small><b id="go-best">0</b></div>
+        </div>
+        <div class="menu-buttons">
+          <button class="btn btn-primary" data-action="restart">↻ Play Again</button>
+          <button class="btn" data-action="menu">Main Menu</button>
+        </div>
+        <p class="hint">Press <kbd>Enter</kbd> to play again</p>
+      </div>
+    </div>
+
+    <!-- Shown only if the 3D library failed to load (e.g. offline) -->
+    <div id="load-error" class="screen hidden">
+      <div class="panel">
+        <h2>Couldn't load 3D engine</h2>
+        <p>Ruins Runner uses Three.js from a CDN. Check your internet connection and reload the page.</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Three.js (classic build, works from file:// and GitHub Pages alike) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script src="game.js"></script>
+</body>
+</html>
