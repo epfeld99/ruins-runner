@@ -17,11 +17,13 @@
     <!-- ============================ HUD ============================ -->
     <div id="hud" class="hidden">
       <div id="danger-vignette"></div>
+      <div id="flash"></div>
 
       <div class="hud-left">
         <div class="hud-label">SCORE</div>
         <div id="hud-score">0</div>
         <div class="hud-sub"><span id="hud-distance">0</span> m · <span id="hud-mult">x1</span></div>
+        <div class="hud-biome" id="hud-biome">Ancient Ruins</div>
       </div>
 
       <div class="hud-right">
@@ -42,13 +44,14 @@
       </div>
 
       <div id="toast"></div>
+      <div id="grapple-prompt" class="hidden">🪝 Press <kbd>E</kbd> / <kbd>Shift</kbd> to GRAPPLE!</div>
     </div>
 
     <!-- ========================= START MENU ========================= -->
     <div id="screen-start" class="screen">
       <div class="panel menu-panel">
         <h1 class="title">RUINS<span>RUNNER</span></h1>
-        <p class="tagline">Steal the idol. Outrun the Demon Monkeys.</p>
+        <p class="tagline">Steal the idol. Outrun the Demon Monkeys.<br><small>Ruins → Lava Cavern → Jungle — a new biome every 500 m</small></p>
         <div class="menu-stats">
           <div><small>BEST</small><b id="menu-best">0</b></div>
           <div><small>COINS</small><b id="menu-bank">0</b></div>
@@ -65,6 +68,7 @@
           <div><kbd>←</kbd><kbd>→</kbd><span>Turn at corners</span></div>
           <div><kbd>A</kbd><kbd>D</kbd><span>Hold to lean / shift lanes</span></div>
           <div><kbd>Space</kbd><span>Power-up (meter full) / Pause</span></div>
+          <div><kbd>E</kbd><kbd>Shift</kbd><span>Grappling hook (canyons)</span></div>
           <div><kbd>Esc</kbd><kbd>M</kbd><span>Pause · Mute</span></div>
         </div>
         <p class="hint">Press <kbd>Enter</kbd> to start</p>

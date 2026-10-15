@@ -326,6 +326,34 @@ kbd {
 #toast.warn { color: #ff7a6b; }
 #toast.good { color: var(--gold); }
 
+#flash { position: absolute; inset: 0; opacity: 0; pointer-events: none; }
+
+.hud-biome {
+  margin-top: 4px;
+  font-family: var(--font-display);
+  font-size: 13px;
+  letter-spacing: 2px;
+  color: var(--muted);
+  text-transform: uppercase;
+}
+
+#grapple-prompt {
+  position: absolute; top: 40%; left: 50%;
+  transform: translateX(-50%);
+  background: rgba(0,0,0,0.6);
+  border: 2px solid var(--gold);
+  border-radius: 999px;
+  padding: 8px 18px;
+  font-weight: 900;
+  font-size: 18px;
+  color: var(--gold);
+  white-space: nowrap;
+  animation: pulse 0.35s ease-in-out infinite alternate;
+}
+
+.coin-box.bump { animation: bump 0.18s ease-out; }
+@keyframes bump { 0% { transform: scale(1); } 40% { transform: scale(1.18); } 100% { transform: scale(1); } }
+
 #danger-vignette {
   position: absolute; inset: 0;
   background: radial-gradient(ellipse at center, transparent 55%, rgba(200,20,10,0.65) 100%);

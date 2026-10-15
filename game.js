@@ -22,6 +22,12 @@
  *   When the player enters a segment, its child segment(s) beyond the
  *   junction are generated so the path ahead is always visible. On a turn
  *   the un-chosen branch and old segments are disposed.
+ *
+ * Biomes
+ *   Every 500 m the world cycles Ruins → Lava Cavern → Jungle. Each segment
+ *   takes the biome of the distance at which it starts (seg.d0), which picks
+ *   its materials, scenery and obstacle mix. Fog, sky and lights blend to
+ *   the new biome when the runner enters its first segment.
  * ========================================================================= */
 (function () {
   'use strict';
@@ -73,6 +79,11 @@
     CAM_UP: 4,
     FOG_COLOR: 0xb4c4a0,
     SUBSTEP: 1 / 120,     // physics sub-step to avoid tunnelling at high speed
+
+    BIOME_LENGTH: 500,    // metres per biome (Ruins → Lava Cavern → Jungle → …)
+    GRAPPLE_RANGE: 14,    // how far before a canyon the hook can be fired
+    GRAPPLE_ARC: 3.4,     // extra height at the top of the swing
+    GRAPPLE_SPEED: 1.1,   // speed multiplier while swinging
   };
 
   const State = { START: 'START', PLAYING: 'PLAYING', PAUSED: 'PAUSED', GAMEOVER: 'GAMEOVER' };
@@ -219,6 +230,11 @@
     smash()  { this.noise(0.25, 0.35, 1200); },
     roar()   { this.tone(90, 0.5, 'sawtooth', 0.22, 160); this.noise(0.4, 0.18, 600); },
     click()  { this.tone(660, 0.05, 'square', 0.08); },
+    grapple() { this.noise(0.25, 0.25, 1800, 0, 'bandpass'); this.tone(500, 0.2, 'square', 0.1, 1400); },
+    whiff()  { this.tone(220, 0.08, 'triangle', 0.12, 160); },
+    crumble() { this.noise(0.45, 0.25, 350); },
+    swoosh() { this.noise(0.18, 0.12, 1500, 0, 'bandpass'); },
+    biome()  { [392, 523, 659, 784].forEach((f, i) => this.tone(f, 0.35, 'triangle', 0.12, 0, i * 0.11)); },
     gameOver() { [392, 330, 262, 196].forEach((f, i) => this.tone(f, 0.28, 'triangle', 0.22, 0, 0.3 + i * 0.18)); },
 
     // ---- tribal drum loop (scheduled ahead with a look-ahead timer) ----
@@ -259,7 +275,8 @@
 
   const camera = new THREE.PerspectiveCamera(65, window.innerWidth / window.innerHeight, 0.1, 400);
 
-  scene.add(new THREE.HemisphereLight(0xfff1d6, 0x2d3b22, 0.95));
+  const hemi = new THREE.HemisphereLight(0xfff1d6, 0x2d3b22, 0.95);
+  scene.add(hemi);
   const sun = new THREE.DirectionalLight(0xffe2b0, 0.75);
   sun.position.set(30, 60, 20);
   scene.add(sun);
@@ -375,6 +392,74 @@
     shieldGem: new THREE.IcosahedronGeometry(0.42, 0),
   };
 
+  // Extra materials / geometry for traps, the grappling hook and scenery
+  Object.assign(MAT, {
+    blade: new THREE.MeshLambertMaterial({ color: 0xc0c4cc, emissive: 0x202428 }),
+    bladeHot: new THREE.MeshLambertMaterial({ color: 0xff7a30, emissive: 0x902800 }),
+    chain: new THREE.MeshLambertMaterial({ color: 0x3a3a3a }),
+    rope: new THREE.MeshLambertMaterial({ color: 0xd8b070, emissive: 0x302010 }),
+    ring: new THREE.MeshLambertMaterial({ color: 0xffc933, emissive: 0x7a5200 }),
+    vine: new THREE.MeshLambertMaterial({ color: 0x2f6b2a }),
+    spire: new THREE.MeshPhongMaterial({ color: 0x2a1610, flatShading: true, shininess: 0 }),
+    rune: new THREE.MeshBasicMaterial({ color: 0x6fe0ff }),
+  });
+  Object.assign(GEO, {
+    blade: new THREE.BoxGeometry(2.1, 1.1, 0.16),
+    spikeBall: new THREE.IcosahedronGeometry(0.8, 0),
+    spike: new THREE.ConeGeometry(0.14, 0.5, 5),
+    swingLog: new THREE.CylinderGeometry(0.55, 0.55, 2.1, 10).rotateZ(Math.PI / 2),
+    tallPillar: new THREE.BoxGeometry(0.9, 9, 0.9),
+    ring: new THREE.TorusGeometry(0.45, 0.1, 8, 20),
+    rope: new THREE.CylinderGeometry(0.04, 0.04, 1, 5).translate(0, 0.5, 0), // unit length along +Y
+    spire: new THREE.ConeGeometry(2.2, 34, 6),
+  });
+  const SWING_PIVOT = 7.6;  // height of a swinging trap's pivot
+  const SWING_LEN = 6.7;    // pivot → trap head (head hangs at ~0.9m)
+  const UP = new THREE.Vector3(0, 1, 0);
+
+  /* ---------- Biomes: atmosphere, materials, scenery & obstacle mix ---------- */
+  const BIOME_ORDER = ['ruins', 'lava', 'jungle'];
+  const BIOMES = {
+    ruins: {
+      name: 'Ancient Ruins', fog: 0xb4c4a0, near: 25, far: 125,
+      ground: 0x2f4a2a, groundGlow: 0x000000, sky: 0xfff1d6, skyGround: 0x2d3b22, sun: 0xffe2b0,
+      mats: { floor: MAT.floor, curb: MAT.curb, wall: MAT.wall, pillar: MAT.pillar },
+      deco: 'trees',
+      weights: { log: 3, overhead: 2, rock: 3, gap: 1.8, halfgap: 1.4, swing: 1.6, slider: 1.6, collapse: 1.5, canyon: 1.1, coins: 2.4, powerup: 0.4 },
+    },
+    lava: {
+      name: 'Lava Cavern', fog: 0x3a1610, near: 18, far: 105,
+      ground: 0xff5a14, groundGlow: 0xff3a00, sky: 0xffa070, skyGround: 0x401008, sun: 0xff8a4a,
+      mats: {
+        floor: new THREE.MeshLambertMaterial({ map: stoneTexture(12, 18, 24, '#ff5a10', false), emissive: 0x1a0500 }),
+        curb: new THREE.MeshLambertMaterial({ map: stoneTexture(10, 14, 16, '#c43a08', false) }),
+        wall: new THREE.MeshLambertMaterial({ map: stoneTexture(8, 16, 18, '#8a2a06', false) }),
+        pillar: new THREE.MeshLambertMaterial({ color: 0x2a1a14 }),
+      },
+      deco: 'spires',
+      weights: { log: 0, overhead: 3.5, rock: 2.5, gap: 2.5, halfgap: 1.5, swing: 1.4, slider: 2, collapse: 2.6, canyon: 1.6, coins: 2, powerup: 0.4 },
+    },
+    jungle: {
+      name: 'Deep Jungle', fog: 0x6f9a68, near: 20, far: 115,
+      ground: 0x1d3a1a, groundGlow: 0x000000, sky: 0xe6ffd0, skyGround: 0x1f3a12, sun: 0xfff2c0,
+      mats: {
+        floor: new THREE.MeshLambertMaterial({ map: stoneTexture(80, 14, 40, '#24301a', true) }),
+        curb: new THREE.MeshLambertMaterial({ map: stoneTexture(95, 20, 30, '#18220f', true) }),
+        wall: new THREE.MeshLambertMaterial({ map: stoneTexture(85, 15, 32, '#1a2410', true) }),
+        pillar: new THREE.MeshLambertMaterial({ color: 0x3a4a2a }),
+      },
+      deco: 'jungle',
+      weights: { log: 3.5, overhead: 2.5, rock: 2, gap: 1.6, halfgap: 1.6, swing: 2.6, slider: 1, collapse: 1.2, canyon: 1.4, coins: 2.4, powerup: 0.4 },
+    },
+  };
+  const biomeAt = (d) => BIOME_ORDER[Math.floor(Math.max(0, d) / CFG.BIOME_LENGTH) % BIOME_ORDER.length];
+  // Cracked (collapsing) tiles: same stone, darker with a reddish glow — the visual tell
+  for (const b of Object.values(BIOMES)) {
+    b.mats.cracked = b.mats.floor.clone();
+    b.mats.cracked.color = new THREE.Color(0x9a6a50);
+    b.mats.cracked.emissive = new THREE.Color(0x3a1000);
+  }
+
   /**
    * Box mesh with UVs scaled so the texture keeps a constant world size
    * on every face (no stretching on long floor pieces).
@@ -398,36 +483,47 @@
    * 7. PARTICLES (pooled debris / sparkles)
    * ===================================================================== */
   const Particles = {
-    list: [],
+    pools: { solid: [], glow: [] }, // glow = additive sparkles that fade out
     init() {
-      for (let i = 0; i < 80; i++) {
-        const m = new THREE.Mesh(GEO.box, new THREE.MeshBasicMaterial({ color: 0xffffff }));
-        m.visible = false;
-        scene.add(m);
-        this.list.push({ m, v: new THREE.Vector3(), life: 0 });
+      for (const kind of ['solid', 'glow']) {
+        for (let i = 0; i < 110; i++) {
+          const mat = kind === 'glow'
+            ? new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false })
+            : new THREE.MeshBasicMaterial({ color: 0xffffff });
+          const m = new THREE.Mesh(GEO.box, mat);
+          m.visible = false;
+          scene.add(m);
+          this.pools[kind].push({ m, v: new THREE.Vector3(), life: 0, max: 1, g: 20 });
+        }
       }
     },
-    spawn(pos, color, n, speed = 6, size = 0.18) {
-      for (const p of this.list) {
+    /** opts: { glow: additive sparkle, gravity: units/s² (negative rises), life: multiplier } */
+    spawn(pos, color, n, speed = 6, size = 0.18, opts = {}) {
+      const pool = this.pools[opts.glow ? 'glow' : 'solid'];
+      for (const p of pool) {
         if (n <= 0) break;
         if (p.life > 0) continue;
         p.m.material.color.setHex(color);
         p.m.position.copy(pos);
         p.m.scale.setScalar(size * rand(0.6, 1.3));
         p.v.set(rand(-1, 1), rand(0.3, 1.4), rand(-1, 1)).multiplyScalar(speed);
-        p.life = rand(0.4, 0.9);
+        p.g = opts.gravity !== undefined ? opts.gravity : 20;
+        p.life = p.max = (opts.life || 1) * rand(0.4, 0.9);
         p.m.visible = true;
         n--;
       }
     },
     update(dt) {
-      for (const p of this.list) {
-        if (p.life <= 0) continue;
-        p.life -= dt;
-        p.v.y -= 20 * dt;
-        p.m.position.addScaledVector(p.v, dt);
-        p.m.rotation.x += dt * 8; p.m.rotation.y += dt * 6;
-        if (p.life <= 0) p.m.visible = false;
+      for (const kind in this.pools) {
+        for (const p of this.pools[kind]) {
+          if (p.life <= 0) continue;
+          p.life -= dt;
+          p.v.y -= p.g * dt;
+          p.m.position.addScaledVector(p.v, dt);
+          p.m.rotation.x += dt * 8; p.m.rotation.y += dt * 6;
+          if (kind === 'glow') p.m.material.opacity = clamp(p.life / p.max, 0, 1);
+          if (p.life <= 0) p.m.visible = false;
+        }
       }
     },
   };
@@ -559,6 +655,10 @@
   magnetRing.rotation.x = Math.PI / 2;
   scene.add(magnetRing);
 
+  const ropeMesh = new THREE.Mesh(GEO.rope, MAT.rope);
+  ropeMesh.visible = false;
+  scene.add(ropeMesh);
+
   const MONKEY_OFFS = [{ x: -1.1, d: 0 }, { x: 1.1, d: 0.7 }, { x: 0, d: 1.6 }];
   const monkeys = MONKEY_OFFS.map(() => buildMonkey());
 
@@ -573,6 +673,7 @@
     yaw: 0, yawVis: 0, lean: 0,
     visOff: new THREE.Vector3(), // decays to 0, smooths snaps on turns
     shield: false, phase: 0,
+    grapple: null, // { c: canyon, sStart, sEnd, y0 } while swinging
   };
 
   /** Per-run state. */
@@ -586,7 +687,8 @@
     turnBuffer: null,
     dying: null, deathReason: '',
     trail: [],
-    camYaw: 0, camY: 0, shake: 0, fov: 65,
+    camYaw: 0, camY: 0, shake: 0, fov: 65, fovKick: 0,
+    biome: 'ruins',
     time: 0, menuAngle: 0,
   };
 
@@ -601,14 +703,19 @@
     return seg.start.clone().addScaledVector(seg.fwd, seg.L);
   }
 
-  /** Create a segment starting at `start` (world) heading `dir`. */
-  function createSegment(start, dir, first) {
+  /**
+   * Create a segment starting at `start` (world) heading `dir`.
+   * `d0` is the run distance at which the runner will reach its start.
+   */
+  function createSegment(start, dir, first, d0) {
+    const biome = biomeAt(d0);
     const seg = {
-      start: start.clone(), dir, first,
+      start: start.clone(), dir, first, d0, biome, B: BIOMES[biome],
       fwd: DIRS[dir], right: DIRS[(dir + 1) % 4],
       L: first ? 120 : randInt(75, 135),
       junction: weighted([['L', 3], ['R', 3], ['T', 2]]),
       obstacles: [], coins: [], pickups: [], gaps: [], halfGaps: [], flames: [], geos: [],
+      movers: [], collapses: [], canyons: [],
       childL: null, childR: null,
       group: new THREE.Group(),
     };
@@ -632,8 +739,9 @@
   /** Generate the branch segment(s) after this segment's junction. */
   function buildChildren(seg) {
     const c = junctionCenter(seg);
-    if (seg.junction !== 'R') seg.childL = createSegment(c, (seg.dir + 3) % 4, false);
-    if (seg.junction !== 'L') seg.childR = createSegment(c, (seg.dir + 1) % 4, false);
+    const d0 = seg.d0 + seg.L;
+    if (seg.junction !== 'R') seg.childL = createSegment(c, (seg.dir + 3) % 4, false, d0);
+    if (seg.junction !== 'L') seg.childR = createSegment(c, (seg.dir + 1) % 4, false, d0);
   }
   const allowsTurn = (seg, side) => (side < 0 ? !!seg.childL : !!seg.childR);
 
@@ -697,11 +805,11 @@
     const g = new THREE.Group();
     g.position.set(0, 0, -s);
     for (const side of [-1, 1]) {
-      const p = new THREE.Mesh(GEO.archPillar, MAT.wall);
+      const p = new THREE.Mesh(GEO.archPillar, seg.B.mats.wall);
       p.position.set(side * (CFG.HALF_W + 0.45), 1.8, 0);
       g.add(p);
     }
-    const beam = new THREE.Mesh(GEO.archTop, MAT.wall);
+    const beam = new THREE.Mesh(GEO.archTop, seg.B.mats.wall);
     beam.position.y = 2.55;
     g.add(beam);
     for (let i = 0; i < 9; i++) {
@@ -714,23 +822,182 @@
       seg.flames.push(f, core);
     }
     seg.group.add(g);
-    seg.obstacles.push({ type: 'fire', s0: s - 0.5, s1: s + 0.5, x0: -3, x1: 3, mesh: g, hit: false, color: 0xff8a20 });
+    seg.obstacles.push({ type: 'overhead', reason: 'burn', s0: s - 0.5, s1: s + 0.5, x0: -3, x1: 3, mesh: g, hit: false, color: 0xff8a20 });
   }
+
+  /** Jungle variant of the overhead obstacle: a low fallen tree — slide under it. */
+  function addBranch(seg, s) {
+    const g = new THREE.Group();
+    g.position.set(0, 0, -s);
+    const trunk = new THREE.Mesh(GEO.log, MAT.log);
+    trunk.position.y = 1.6;
+    trunk.rotation.x = rand(-0.2, 0.2);
+    g.add(trunk);
+    for (const side of [-1, 1]) {
+      const post = boxMesh(0.8, 2.2, 0.8, MAT.trunk);
+      post.position.set(side * (CFG.HALF_W + 0.45), 1.1, 0);
+      g.add(post);
+    }
+    for (let i = 0; i < 5; i++) {
+      const leaf = new THREE.Mesh(GEO.canopy, pick(MAT.leaves));
+      leaf.scale.setScalar(rand(0.16, 0.26));
+      leaf.position.set(rand(-3, 3), 2.05 + rand(0, 0.2), rand(-0.3, 0.3));
+      g.add(leaf);
+    }
+    seg.group.add(g);
+    seg.obstacles.push({ type: 'overhead', reason: 'branch', s0: s - 0.5, s1: s + 0.5, x0: -3, x1: 3, mesh: g, hit: false, color: 0x6b4626 });
+  }
+
+  /**
+   * Swinging trap on a tall gantry: an axe blade (Ruins), spiked lava ball
+   * (Lava Cavern) or battering log (Jungle) sweeping across every lane.
+   * Time your lane change — or jump it at the bottom of the swing.
+   */
+  function addSwing(seg, s, phase = rand(0, Math.PI * 2)) {
+    const g = new THREE.Group();
+    g.position.set(0, 0, -s);
+    for (const side of [-1, 1]) {
+      const p = new THREE.Mesh(GEO.tallPillar, seg.B.mats.wall);
+      p.position.set(side * (CFG.HALF_W + 0.45), 4.5, 0);
+      g.add(p);
+    }
+    const beam = new THREE.Mesh(GEO.archTop, seg.B.mats.wall);
+    beam.position.y = SWING_PIVOT + 0.45;
+    g.add(beam);
+    const pivot = new THREE.Group();
+    pivot.position.y = SWING_PIVOT;
+    g.add(pivot);
+    const rod = boxMesh(0.12, SWING_LEN, 0.12, MAT.chain);
+    rod.position.y = -SWING_LEN / 2;
+    pivot.add(rod);
+    let head;
+    if (seg.biome === 'jungle') {
+      head = new THREE.Mesh(GEO.swingLog, MAT.log);
+    } else if (seg.biome === 'lava') {
+      head = new THREE.Group();
+      head.add(new THREE.Mesh(GEO.spikeBall, MAT.bladeHot));
+      for (let i = 0; i < 10; i++) {
+        const d = new THREE.Vector3(rand(-1, 1), rand(-1, 1), rand(-1, 1)).normalize();
+        const sp = new THREE.Mesh(GEO.spike, MAT.bladeHot);
+        sp.position.copy(d).multiplyScalar(0.85);
+        sp.quaternion.setFromUnitVectors(UP, d);
+        head.add(sp);
+      }
+    } else {
+      head = new THREE.Mesh(GEO.blade, MAT.blade);
+    }
+    head.position.y = -SWING_LEN;
+    pivot.add(head);
+    seg.group.add(g);
+    const o = {
+      type: 'swing', s0: s - 0.45, s1: s + 0.45, x0: -3, x1: 3, mesh: g, pivot, hit: false, color: 0x9a9aa0,
+      amp: 0.46, omega: 2.1, phase, bx: 0, by: 0.9, lastSide: 0,
+    };
+    seg.obstacles.push(o);
+    seg.movers.push(o);
+  }
+
+  /** Stone block sliding back and forth across the lanes on a rail. */
+  function addSlider(seg, s) {
+    const rail = boxMesh(CFG.PATH_W, 0.06, 0.35, MAT.chain);
+    rail.position.set(0, 0.03, -s);
+    seg.group.add(rail);
+    const g = new THREE.Group();
+    g.position.set(0, 0, -s);
+    const block = boxMesh(1.8, 1.1, 1.3, seg.B.mats.wall);
+    block.position.y = 0.55;
+    g.add(block);
+    const rune = boxMesh(1.2, 0.16, 0.02, MAT.rune); // faces the runner (+Z)
+    rune.position.set(0, 0.75, 0.66);
+    g.add(rune);
+    seg.group.add(g);
+    const o = {
+      type: 'slider', s0: s - 0.65, s1: s + 0.65, x0: -0.95, x1: 0.95, mesh: g, hit: false, clipped: false,
+      color: 0x7a7060, jumpH: 1.1, range: 2.05, omega: rand(1.4, 2.0), phase: rand(0, Math.PI * 2),
+    };
+    seg.obstacles.push(o);
+    seg.movers.push(o);
+  }
+
+  /**
+   * Collapsing floor: a run of tiles where the cracked (dark, glowing) ones
+   * shake as you approach and drop away just before you reach them — jump!
+   * The rest crumble behind you. Returns the length used.
+   */
+  function addCollapse(seg, s, speed) {
+    const n = 5, len = 2.4;
+    const cracked = speed > 18 ? 3 : 2;
+    const first = randInt(1, n - cracked - 1);
+    const sec = { s0: s, s1: s + n * len, tiles: [] };
+    for (let i = 0; i < n; i++) {
+      const isCracked = i >= first && i < first + cracked;
+      const t0 = s + i * len;
+      const m = boxUV(seg, CFG.PATH_W - 0.06, 1.2, len - 0.08, isCracked ? seg.B.mats.cracked : seg.B.mats.floor);
+      m.position.set(0, -0.6, -(t0 + len / 2));
+      seg.group.add(m);
+      sec.tiles.push({ s0: t0, s1: t0 + len, cracked: isCracked, mesh: m, state: 'solid', t: 0, vy: 0 });
+    }
+    seg.collapses.push(sec);
+    coinArc(seg, pick(CFG.LANES), s + (first + cracked / 2) * len, 4.5, 6, 1.5);
+    return n * len;
+  }
+
+  /**
+   * Canyon: far too wide to jump. A golden hook ring hangs from a gantry
+   * above the middle — fire the grappling hook (E / Shift) to swing across.
+   */
+  function addCanyon(seg, s, speed) {
+    const len = canyonLength(speed);
+    const c = { s0: s, s1: s + len, anchorS: s + len / 2, anchorY: 9 };
+    seg.canyons.push(c);
+    const g = new THREE.Group();
+    g.position.set(0, 0, -c.anchorS);
+    for (const side of [-1, 1]) {
+      const p = new THREE.Mesh(GEO.pillar, seg.B.mats.pillar);
+      p.position.set(side * (CFG.HALF_W + 1.4), -3, 0);
+      g.add(p);
+    }
+    const beam = boxMesh(CFG.PATH_W + 5.2, 0.8, 1.4, seg.B.mats.wall);
+    beam.position.y = 10.4;
+    g.add(beam);
+    const chain = boxMesh(0.1, 0.6, 0.1, MAT.chain);
+    chain.position.y = 9.75;
+    g.add(chain);
+    const ring = new THREE.Mesh(GEO.ring, MAT.ring);
+    ring.position.y = c.anchorY;
+    g.add(ring);
+    const halo = new THREE.Mesh(GEO.halo, MAT.halo);
+    halo.position.y = c.anchorY;
+    halo.scale.setScalar(1.3);
+    g.add(halo);
+    c.ring = ring; c.halo = halo;
+    seg.group.add(g);
+    // reward coins along a typical swing arc
+    const a = s - 6, b = c.s1 + 2.5;
+    const v = coinValue();
+    for (let sc = s + 1; sc < c.s1; sc += 2.2) {
+      const t = (sc - a) / (b - a);
+      addCoin(seg, sc, 0, 0.9 + 0.5 * t + CFG.GRAPPLE_ARC * Math.sin(Math.PI * t), v);
+    }
+    return len;
+  }
+  /** Canyon width grows with speed so it always out-ranges a normal jump. */
+  const canyonLength = (speed) => clamp(speed * 1.05, 14, 32);
 
   /** Rubble block filling one lane — dodge sideways or jump. */
   function addRock(seg, s, lane) {
     const cx = CFG.LANES[lane];
     const g = new THREE.Group();
     g.position.set(cx, 0, -s);
-    const block = boxMesh(1.8, 1.3, 1.4, MAT.wall); block.position.y = 0.65; g.add(block);
+    const block = boxMesh(1.8, 1.3, 1.4, seg.B.mats.wall); block.position.y = 0.65; g.add(block);
     for (let i = 0; i < 3; i++) {
-      const r = new THREE.Mesh(GEO.rubble, MAT.wall);
+      const r = new THREE.Mesh(GEO.rubble, seg.B.mats.wall);
       r.position.set(rand(-0.6, 0.6), 1.3 + rand(0, 0.2), rand(-0.4, 0.4));
       r.scale.setScalar(rand(0.5, 0.9)); r.rotation.set(rand(0, 3), rand(0, 3), 0);
       g.add(r);
     }
     seg.group.add(g);
-    seg.obstacles.push({ type: 'rock', s0: s - 0.7, s1: s + 0.7, x0: cx - 0.95, x1: cx + 0.95, mesh: g, hit: false, clipped: false, color: 0x7a7060 });
+    seg.obstacles.push({ type: 'rock', s0: s - 0.7, s1: s + 0.7, x0: cx - 0.95, x1: cx + 0.95, mesh: g, hit: false, clipped: false, color: 0x7a7060, jumpH: 1.25 });
   }
 
   /**
@@ -738,19 +1005,25 @@
    * current speed so there's always time to react.
    */
   function populateSegment(seg) {
-    const diff = clamp(G.distance / 2500, 0, 1);
-    const speed = Math.min(CFG.MAX_SPEED, CFG.BASE_SPEED + G.distance * CFG.SPEED_RAMP);
+    // Difficulty and speed estimated for when the runner will actually get here.
+    const diff = clamp(seg.d0 / 2500, 0, 1);
+    const speed = Math.min(CFG.MAX_SPEED, CFG.BASE_SPEED + seg.d0 * CFG.SPEED_RAMP);
+    const W = seg.B.weights;
     let s = seg.first ? 45 : 22;
     const end = seg.L - 18;
 
     while (true) {
       s += Math.max(speed * 0.85, 11) * rand(1.0, 1.7 - diff * 0.5);
       if (s > end) break;
-      const type = weighted([
-        ['log', 3], ['fire', 2.5], ['rock', 3],
-        ['gap', diff > 0.04 ? 2.2 : 0.7], ['halfgap', 1.5],
-        ['coins', 2.6 - diff], ['powerup', 0.4],
+      let type = weighted([
+        ['log', W.log], ['overhead', W.overhead], ['rock', W.rock],
+        ['gap', diff > 0.04 ? W.gap : W.gap * 0.3], ['halfgap', W.halfgap],
+        ['swing', W.swing], ['slider', W.slider], ['collapse', W.collapse], ['canyon', W.canyon],
+        ['coins', W.coins - diff], ['powerup', W.powerup],
       ]);
+      // long features must fit before the junction
+      if (type === 'canyon' && s + canyonLength(speed) + 4 > end) type = 'coins';
+      if (type === 'collapse' && s + 12 > end) type = 'coins';
       const lane = randInt(0, 2);
       switch (type) {
         case 'log':
@@ -758,8 +1031,8 @@
           if (Math.random() < 0.6) coinArc(seg, CFG.LANES[lane], s);
           s += 1;
           break;
-        case 'fire':
-          addFire(seg, s);
+        case 'overhead':
+          if (seg.biome === 'jungle') addBranch(seg, s); else addFire(seg, s);
           if (Math.random() < 0.6) coinLine(seg, CFG.LANES[lane], s - 4, 5, 0.55);
           s += 1;
           break;
@@ -787,8 +1060,28 @@
           s += len;
           break;
         }
+        case 'swing': {
+          const ph = rand(0, Math.PI * 2);
+          addSwing(seg, s, ph);
+          coinLine(seg, CFG.LANES[lane], s - 4, 5);
+          // later on: a second trap swinging in opposition — no safe lane to wait in
+          if (diff > 0.25 && s + 7 < end) { addSwing(seg, s + 6, ph + Math.PI); s += 6; }
+          s += 1;
+          break;
+        }
+        case 'slider':
+          addSlider(seg, s);
+          coinArc(seg, 0, s, 4, 5, 1.6);
+          s += 1.5;
+          break;
+        case 'collapse':
+          s += addCollapse(seg, s, speed);
+          break;
+        case 'canyon':
+          s += addCanyon(seg, s, speed) + 4; // landing room
+          break;
         case 'coins': {
-          const n = randInt(7, 11);
+          const n = Math.max(3, Math.min(randInt(7, 11), Math.floor((end + 8 - s) / 2)));
           if (Math.random() < 0.4) {
             // zig-zag across lanes to reward leaning
             const v = coinValue();
@@ -813,14 +1106,15 @@
     const sB = seg.L + H;
     const openL = seg.junction !== 'R';
     const openR = seg.junction !== 'L';
+    const M = seg.B.mats;
 
     function floor(s0, s1, x0, x1) {
       if (s1 - s0 < 0.01) return;
-      const m = boxUV(seg, x1 - x0, 1.2, s1 - s0, MAT.floor);
+      const m = boxUV(seg, x1 - x0, 1.2, s1 - s0, M.floor);
       m.position.set((x0 + x1) / 2, -0.6, -(s0 + s1) / 2);
       grp.add(m);
       for (let s = Math.ceil(s0 / 16) * 16; s < s1 - 1; s += 16) {
-        const p = new THREE.Mesh(GEO.pillar, MAT.pillar);
+        const p = new THREE.Mesh(GEO.pillar, M.pillar);
         p.position.set((x0 + x1) / 2, -14.2, -s);
         grp.add(p);
       }
@@ -830,26 +1124,32 @@
       if ((side < 0 && openL) || (side > 0 && openR)) s1 = Math.min(s1, seg.L - H);
       else if (s1 >= sB - 0.01) s1 = sB + 0.6; // close the corner
       if (s1 - s0 < 0.3) return;
-      const m = boxUV(seg, 0.6, 1.75, s1 - s0, MAT.curb);
+      const m = boxUV(seg, 0.6, 1.75, s1 - s0, M.curb);
       m.position.set(side * (H + 0.3), -0.325, -(s0 + s1) / 2);
       grp.add(m);
       for (let s = Math.ceil(s0 / 14) * 14 + 7; s < s1 - 1; s += 14) {
-        const col = new THREE.Mesh(GEO.column, MAT.curb);
+        const col = new THREE.Mesh(GEO.column, M.curb);
         col.position.set(side * (H + 0.3), 1.4, -s);
-        const cap = new THREE.Mesh(GEO.columnCap, MAT.curb);
+        const cap = new THREE.Mesh(GEO.columnCap, M.curb);
         cap.position.set(side * (H + 0.3), 2.35, -s);
         grp.add(col, cap);
       }
     }
 
     // Walk along the segment cutting out gaps.
+    // (collapse sections build their own tiles but keep the side curbs)
     const cuts = seg.gaps.map((g) => ({ ...g, full: true }))
+      .concat(seg.canyons.map((c) => ({ s0: c.s0, s1: c.s1, full: true })))
+      .concat(seg.collapses.map((c) => ({ s0: c.s0, s1: c.s1, full: true, keepCurbs: true })))
       .concat(seg.halfGaps.map((g) => ({ ...g, full: false })))
       .sort((a, b) => a.s0 - b.s0);
-    let cur = sA;
+    let cur = sA, curbFrom = sA;
     for (const c of cuts) {
       floor(cur, c.s0, -H, H);
-      curb(-1, cur, c.s0); curb(1, cur, c.s0);
+      if (!c.keepCurbs) {
+        curb(-1, curbFrom, c.s0); curb(1, curbFrom, c.s0);
+        curbFrom = c.s1;
+      }
       if (!c.full) {
         // keep the solid half
         if (c.side < 0) { floor(c.s0, c.s1, 0, H); curb(1, c.s0, c.s1); }
@@ -858,10 +1158,10 @@
       cur = c.s1;
     }
     floor(cur, sB, -H, H);
-    curb(-1, cur, sB); curb(1, cur, sB);
+    curb(-1, curbFrom, sB); curb(1, curbFrom, sB);
 
     // Carved wall at the end of the junction — you must turn.
-    const wall = boxUV(seg, CFG.PATH_W + 1.8, 5, 1.2, MAT.wall);
+    const wall = boxUV(seg, CFG.PATH_W + 1.8, 5, 1.2, M.wall);
     wall.position.set(0, 1.3, -(sB + 0.6));
     grp.add(wall);
     const glyph = boxMesh(1.2, 1.2, 0.1, MAT.flameCore);
@@ -869,11 +1169,32 @@
     glyph.rotation.z = Math.PI / 4;
     grp.add(glyph);
 
-    // Jungle trees rising from far below (kept clear of neighbouring paths)
+    // Scenery rising from far below (kept clear of neighbouring paths):
+    // trees in the Ruins, dense trees + vines in the Jungle, basalt spires in Lava.
+    const deco = seg.B.deco;
     const tStart = seg.first ? -20 : 10;
-    for (let s = tStart; s < seg.L - 9; s += rand(7, 13)) {
+    for (let s = tStart; s < seg.L - 9; s += deco === 'jungle' ? rand(4, 8) : rand(7, 13)) {
       const side = Math.random() < 0.5 ? -1 : 1;
-      const x = side * rand(8, 16);
+      const x = side * (deco === 'jungle' ? rand(7, 14) : rand(8, 16));
+      if (deco === 'spires') {
+        const sp = new THREE.Mesh(GEO.spire, MAT.spire);
+        sp.position.set(x, -16 + rand(-4, 6), -s);
+        sp.scale.set(rand(0.6, 1.3), rand(0.8, 1.1), rand(0.6, 1.3));
+        grp.add(sp);
+        if (Math.random() < 0.35) { // stalactite hanging out of the dark
+          const st = new THREE.Mesh(GEO.spire, MAT.spire);
+          st.rotation.x = Math.PI;
+          st.scale.set(0.35, 0.4, 0.35);
+          st.position.set(-side * rand(5, 10), 16, -s - rand(0, 5));
+          grp.add(st);
+        }
+        continue;
+      }
+      if (deco === 'jungle' && Math.random() < 0.6) {
+        const vine = boxMesh(0.08, rand(2.5, 4.5), 0.08, MAT.vine);
+        vine.position.set(side * rand(3.3, 4.3), 7.5 - vine.scale.y / 2, -s);
+        grp.add(vine);
+      }
       const trunk = new THREE.Mesh(GEO.trunk, MAT.trunk);
       trunk.position.set(x, -12, -s);
       grp.add(trunk);
@@ -893,10 +1214,90 @@
     if (s < CFG.HALF_W && !seg.first) return true; // previous junction tile
     if (s > seg.L + CFG.HALF_W) return false;
     for (const g of seg.gaps) if (s > g.s0 + 0.3 && s < g.s1 - 0.3) return false;
+    for (const c of seg.canyons) if (s > c.s0 + 0.3 && s < c.s1 - 0.3) return false;
+    for (const sec of seg.collapses) {
+      // unsupported only if both edges of a 0.6m footprint are over fallen tiles
+      if (s > sec.s0 - 0.3 && s < sec.s1 + 0.3 && tileGone(sec, s - 0.3) && tileGone(sec, s + 0.3)) return false;
+    }
     for (const h of seg.halfGaps) {
       if (s > h.s0 + 0.3 && s < h.s1 - 0.3 && (h.side < 0 ? x < -0.35 : x > 0.35)) return false;
     }
     return true;
+  }
+
+  function tileGone(sec, s) {
+    for (const t of sec.tiles) if (s >= t.s0 && s < t.s1) return t.state === 'falling' || t.state === 'gone';
+    return false;
+  }
+
+  /** Swing pendulums and slide blocks (deterministic from G.time). */
+  function updateMovers(seg) {
+    for (const o of seg.movers) {
+      if (o.hit) continue;
+      if (o.type === 'swing') {
+        const a = o.amp * Math.sin(G.time * o.omega + o.phase);
+        o.pivot.rotation.z = a;
+        o.bx = SWING_LEN * Math.sin(a);
+        o.by = SWING_PIVOT - SWING_LEN * Math.cos(a);
+        // whoosh as it sweeps through the centre near the runner
+        const side = Math.sign(o.bx);
+        if (seg === P.seg && side !== o.lastSide && Math.abs(o.s0 - P.s) < 18 && state === State.PLAYING) Sfx.swoosh();
+        o.lastSide = side;
+      } else {
+        const x = o.range * Math.sin(G.time * o.omega + o.phase);
+        o.mesh.position.x = x;
+        o.x0 = x - 0.95; o.x1 = x + 0.95;
+      }
+    }
+  }
+
+  /**
+   * Collapsing tiles: cracked tiles start shaking ~1.3s before you arrive and
+   * drop ~0.7s before; solid tiles crumble once you're past. Only the current
+   * segment triggers, but falling tiles animate everywhere.
+   */
+  function updateCollapses(seg, dt, isCurrent) {
+    for (const sec of seg.collapses) {
+      for (const t of sec.tiles) {
+        if (t.state === 'gone') continue;
+        const ahead = t.s0 - P.s;
+        if (t.state === 'solid' && isCurrent) {
+          if (t.cracked && ahead < G.speed * 1.3) { t.state = 'shaking'; t.t = 0; }
+          else if (!t.cracked && P.s > t.s1 + 1.5) { t.state = 'shaking'; t.t = 0; }
+        } else if (t.state === 'shaking') {
+          t.t += dt;
+          t.mesh.position.x = rand(-0.07, 0.07);
+          t.mesh.position.y = -0.6 + rand(-0.05, 0.05);
+          if ((t.cracked && ahead < G.speed * 0.7) || (!t.cracked && t.t > 0.3) || !isCurrent) {
+            t.state = 'falling';
+            t.vy = 0;
+            t.mesh.getWorldPosition(_a);
+            Particles.spawn(_a, 0x8a7a66, 10, 4, 0.25);
+            if (t.cracked) { Sfx.crumble(); G.shake = Math.max(G.shake, 0.18); }
+          }
+        } else if (t.state === 'falling') {
+          t.vy -= 30 * dt;
+          t.mesh.position.y += t.vy * dt;
+          t.mesh.rotation.x += dt * 0.9;
+          if (t.mesh.position.y < -40) { t.state = 'gone'; t.mesh.visible = false; }
+        }
+      }
+    }
+  }
+
+  /** Blend fog, sky, lights and the ground far below toward a biome (k=1 snaps). */
+  const _col = new THREE.Color();
+  function applyAtmosphere(biome, k) {
+    const B = BIOMES[biome];
+    scene.background.lerp(_col.setHex(B.fog), k);
+    scene.fog.color.copy(scene.background);
+    scene.fog.near += (B.near - scene.fog.near) * k;
+    scene.fog.far += (B.far - scene.fog.far) * k;
+    jungleFloor.material.color.lerp(_col.setHex(B.ground), k);
+    jungleFloor.material.emissive.lerp(_col.setHex(B.groundGlow), k);
+    hemi.color.lerp(_col.setHex(B.sky), k);
+    hemi.groundColor.lerp(_col.setHex(B.skyGround), k);
+    sun.color.lerp(_col.setHex(B.sun), k);
   }
 
   /* =======================================================================
@@ -914,16 +1315,18 @@
       magnetT: 0, boostT: 0, invulnT: 0,
       stumbleT: 0, chase: 2, introT: 3,
       turnBuffer: null, dying: null, deathReason: '',
-      camYaw: 0, camY: 0, shake: 0, time: 0,
+      camYaw: 0, camY: 0, shake: 0, fovKick: 0, time: 0, biome: 'ruins',
     });
     Object.assign(P, {
       s: 0, x: 0, y: 0, vy: 0, onGround: true, falling: false, coyote: 0, jumpBuffer: 0,
       fastFall: false, slideQueued: false, sliding: false, slideT: 0,
-      yaw: 0, yawVis: 0, lean: 0, shield: upg('shieldStart') > 0, phase: 0,
+      yaw: 0, yawVis: 0, lean: 0, shield: upg('shieldStart') > 0, phase: 0, grapple: null,
     });
     P.visOff.set(0, 0, 0);
+    ropeMesh.visible = false;
+    applyAtmosphere('ruins', 1);
 
-    const first = createSegment(new THREE.Vector3(0, 0, 0), 0, true);
+    const first = createSegment(new THREE.Vector3(0, 0, 0), 0, true, 0);
     P.seg = first;
     buildChildren(first);
 
@@ -989,13 +1392,15 @@
     Save.data.highScores = Save.data.highScores.slice(0, 10);
     Save.save();
 
-    const titles = { caught: 'Caught!', fall: 'You Fell!', wall: 'Splat!', crash: 'Crashed!', burn: 'Scorched!' };
+    const titles = { caught: 'Caught!', fall: 'You Fell!', wall: 'Splat!', crash: 'Crashed!', burn: 'Scorched!', swing: 'Smacked!', branch: 'Bonk!' };
     const reasons = {
       caught: 'The Demon Monkeys got you.',
       fall: 'You plunged into the abyss.',
       wall: 'You ran straight into a wall. Turn at the corners!',
       crash: 'You ran into an obstacle.',
       burn: 'Slide under the fire traps!',
+      swing: 'Time your dodge past swinging traps — or jump them at the bottom of the swing.',
+      branch: 'Slide under low branches!',
     };
     $('go-title').textContent = titles[G.deathReason] || 'Game Over';
     $('go-reason').textContent = reasons[G.deathReason] || '';
@@ -1012,7 +1417,7 @@
    * 13. PLAYER ACTIONS
    * ===================================================================== */
   function jump() {
-    if (G.dying) return;
+    if (G.dying || P.grapple) return;
     const canCoyote = P.falling && P.coyote > 0;
     if (P.onGround || canCoyote) {
       P.vy = CFG.JUMP_V * jumpMul();
@@ -1025,7 +1430,7 @@
   }
 
   function slide() {
-    if (G.dying) return;
+    if (G.dying || P.grapple) return;
     if (P.onGround) {
       P.sliding = true;
       P.slideT = CFG.SLIDE_TIME;
@@ -1034,6 +1439,48 @@
       // in the air: slam down, then slide on landing
       P.fastFall = true;
       P.slideQueued = true;
+    }
+  }
+
+  /** Canyon whose hook is within reach right now (or null). */
+  function grappleTarget() {
+    for (const c of P.seg.canyons) {
+      if (P.s > c.s0 - CFG.GRAPPLE_RANGE && P.s < c.s0 + 4 && P.y > -1.6) return c;
+    }
+    return null;
+  }
+
+  /**
+   * Fire the grappling hook (E / Shift). `forced` is a canyon to latch onto
+   * regardless of range (used by the Shield to rescue a fall).
+   */
+  function grapple(forced) {
+    if (G.dying || P.grapple) return false;
+    const c = forced || grappleTarget();
+    if (!c) { Sfx.whiff(); return false; }
+    P.grapple = { c, sStart: P.s, sEnd: c.s1 + 2.5, y0: P.y };
+    P.onGround = false; P.falling = false; P.vy = 0;
+    P.sliding = false; P.slideQueued = false; P.fastFall = false;
+    G.fovKick = Math.max(G.fovKick, 9);
+    G.shake = Math.max(G.shake, 0.15);
+    Sfx.grapple();
+    return true;
+  }
+
+  /** While swinging: follow an arc from the launch point to the far rim. */
+  function stepGrapple(h) {
+    const g = P.grapple;
+    const v = G.speed * CFG.GRAPPLE_SPEED;
+    P.s += v * h;
+    G.distance += v * h;
+    P.x = damp(P.x, 0, 4, h);
+    const t = clamp((P.s - g.sStart) / (g.sEnd - g.sStart), 0, 1);
+    P.y = g.y0 + (0.6 - g.y0) * t + CFG.GRAPPLE_ARC * Math.sin(Math.PI * t);
+    if (t >= 1) {
+      P.grapple = null;
+      P.vy = 3;
+      P.onGround = false; P.falling = false;
+      G.shake = Math.max(G.shake, 0.2);
     }
   }
 
@@ -1093,7 +1540,7 @@
   /** Activate a power-up (from a pickup or the meter). */
   function activatePower(type) {
     if (type === 'magnet') { G.magnetT = magnetDuration(); UI.toast('Coin Magnet!', 'good'); }
-    else if (type === 'boost') { G.boostT = boostDuration(); G.stumbleT = 0; UI.toast('BOOST!', 'good'); }
+    else if (type === 'boost') { G.boostT = boostDuration(); G.stumbleT = 0; G.fovKick = 14; UI.toast('BOOST!', 'good'); }
     else if (type === 'shield') { P.shield = true; UI.toast('Shield Up!', 'good'); }
     Sfx.power();
   }
@@ -1115,6 +1562,8 @@
     o.mesh.getWorldPosition(_a);
     _a.y += 0.8;
     Particles.spawn(_a, o.color, 18, 7, 0.28);
+    Particles.spawn(_a, 0xffe9a0, 8, 6, 0.12, { glow: true, gravity: 4 });
+    G.shake = Math.max(G.shake, 0.3);
     Sfx.smash();
   }
 
@@ -1134,10 +1583,17 @@
       G.invulnT = 1.0;
       Sfx.shieldBreak();
       UI.toast('Shield saved you!', 'good');
+      UI.flash('rgba(74,168,255,0.45)');
+      G.shake = Math.max(G.shake, 0.5);
       getRunnerWorld(_a); _a.y += 1;
-      Particles.spawn(_a, 0x4aa8ff, 20, 6, 0.2);
+      Particles.spawn(_a, 0x4aa8ff, 24, 6, 0.2, { glow: true, gravity: 4 });
       if (obstacle) smashObstacle(obstacle);
-      if (reason === 'fall') {
+      const canyon = reason === 'fall' && P.seg.canyons.find((c) => P.s > c.s0 - 1 && P.s < c.s1);
+      if (canyon) {
+        // too wide to bounce out of: auto-fire the hook instead
+        P.y = Math.max(P.y, -0.5);
+        grapple(canyon);
+      } else if (reason === 'fall') {
         // bounce back up and drift to solid ground
         P.y = Math.max(P.y, -0.3);
         P.vy = CFG.JUMP_V * 1.15;
@@ -1150,7 +1606,9 @@
     }
     G.dying = { type: reason, t: 0 };
     G.deathReason = reason;
-    G.shake = 0.6;
+    G.shake = reason === 'fall' ? 0.4 : 0.9;
+    UI.flash(reason === 'fall' ? 'rgba(0,0,0,0.5)' : 'rgba(255,60,40,0.55)');
+    P.grapple = null;
     if (reason === 'fall') Sfx.splash(); else Sfx.crash();
     if (reason === 'caught') Sfx.roar();
     return false;
@@ -1160,7 +1618,10 @@
   function stumble() {
     if (G.dying || G.invulnT > 0 || G.boostT > 0) return;
     G.speedMul = 0.55;
-    G.shake = 0.35;
+    G.shake = 0.55;
+    UI.flash('rgba(255,120,40,0.35)');
+    getRunnerWorld(_a); _a.y += 0.3;
+    Particles.spawn(_a, 0xb09a7a, 10, 4, 0.15);
     Sfx.stumble();
     if (G.stumbleT > 0) {
       fatal('caught');
@@ -1177,6 +1638,7 @@
   /** One physics sub-step. */
   function stepPlayer(h) {
     const seg = P.seg;
+    if (P.grapple) { stepGrapple(h); return; } // no ground / obstacles mid-swing
 
     // ---- forward + lateral motion ----
     P.s += G.speed * h;
@@ -1234,18 +1696,28 @@
       if (o.type === 'log') {
         if (P.y < 0.45) { if (!fatal('crash', o)) return; }
         else if (P.y < 0.8) { o.hit = true; stumble(); } // clipped it with your feet
-      } else if (o.type === 'fire') {
+      } else if (o.type === 'overhead') {
         const top = P.y + (P.sliding ? 0.85 : 1.8);
-        if (top > 1.05) { if (!fatal('burn', o)) return; }
-      } else if (o.type === 'rock') {
-        if (P.y > 1.25) continue; // jumped over
+        if (top > 1.05) { if (!fatal(o.reason, o)) return; }
+      } else if (o.type === 'swing') {
+        const top = P.y + (P.sliding ? 0.85 : 1.8);
+        if (top < o.by - 0.55 || P.y > o.by + 0.55) continue; // under / over the head
+        const dx = Math.abs(P.x - o.bx);
+        if (dx < 1.15) { if (!fatal('swing', o)) return; }
+        else if (dx < 1.45) { o.hit = true; stumble(); } // grazed by the edge
+      } else if (o.type === 'rock' || o.type === 'slider') {
+        if (P.y > o.jumpH) continue; // jumped over
         const ov = Math.min(P.x + 0.4, o.x1) - Math.max(P.x - 0.4, o.x0);
         if (ov <= 0) continue;
         const pushOut = () => {
           P.x = P.x < (o.x0 + o.x1) / 2 ? o.x0 - 0.41 : o.x1 + 0.41;
           P.x = clamp(P.x, -CFG.LANE_LIMIT, CFG.LANE_LIMIT);
         };
-        if (o.clipped) { pushOut(); continue; }  // already brushed: acts as a solid side wall
+        if (o.clipped) {
+          pushOut(); // already brushed: acts as a solid side wall
+          if (Math.min(P.x + 0.4, o.x1) - Math.max(P.x - 0.4, o.x0) > 0) o.hit = true; // pinned at the edge: let it pass
+          continue;
+        }
         if (ov < 0.5) { o.clipped = true; pushOut(); stumble(); }  // side clip
         else if (!fatal('crash', o)) return;      // head-on
       }
@@ -1270,11 +1742,13 @@
       G.meter = Math.min(G.meterMax, G.meter + c.value);
       Sfx.coin(c.value);
       c.mesh.getWorldPosition(_a);
-      Particles.spawn(_a, COIN_HEX[c.value], 4, 3, 0.1);
+      Particles.spawn(_a, COIN_HEX[c.value], 8 + c.value * 2, 3.5, 0.12, { glow: true, gravity: 5, life: 0.9 });
+      Particles.spawn(_a, 0xffffff, 3, 2, 0.07, { glow: true, gravity: 0, life: 0.5 });
+      UI.bumpCoins();
     };
     for (const c of seg.coins) {
       if (c.taken) continue;
-      if (G.magnetT > 0 && !c.flying && Math.abs(c.s - P.s) < CFG.MAGNET_RANGE) {
+      if (G.magnetT > 0 && !c.flying && c.s > P.s - 0.5 && c.s - P.s < CFG.MAGNET_RANGE) { // only coins ahead
         c.flying = true;
         scene.attach(c.mesh); // detach from segment, keep world transform
       }
@@ -1329,9 +1803,37 @@
     G.chase = damp(G.chase, target, target < G.chase ? 6 : 2, dt);
 
     if (!G.dying) updateCollectibles(dt);
+    updateCollapses(P.seg, dt, true);
+
+    // ---- biome transitions (when entering the first segment of a new biome) ----
+    if (P.seg.biome !== G.biome) {
+      G.biome = P.seg.biome;
+      UI.toast('Entering ' + BIOMES[G.biome].name, 'good');
+      Sfx.biome();
+    }
+    applyAtmosphere(G.biome, 1 - Math.exp(-dt * 1.2));
+    spawnAmbient(dt);
+
     G.score = Math.floor(G.distance * G.mult) + G.coins;
     updateVisuals(dt);
     UI.updateHUD();
+  }
+
+  /** Biome flavour particles: rising embers in lava, fireflies in the jungle, boost sparks. */
+  function spawnAmbient(dt) {
+    const rate = G.biome === 'lava' ? 26 : G.biome === 'jungle' ? 8 : 0;
+    getRunnerWorld(_pos);
+    const fx = -Math.sin(P.yaw), fz = -Math.cos(P.yaw);
+    if (Math.random() < rate * dt) {
+      const ahead = rand(4, 30), side = rand(-9, 9);
+      _a.set(_pos.x + fx * ahead - fz * side, rand(-3, 2), _pos.z + fz * ahead + fx * side);
+      if (G.biome === 'lava') Particles.spawn(_a, pick([0xff7a20, 0xffb040, 0xff4010]), 1, 0.6, 0.12, { glow: true, gravity: -3, life: 3 });
+      else { _a.y = rand(1, 5); Particles.spawn(_a, 0xd8ff70, 1, 0.5, 0.08, { glow: true, gravity: 0, life: 3 }); }
+    }
+    if (G.boostT > 0 && Math.random() < 0.8) {
+      _a.set(_pos.x + rand(-0.4, 0.4), rand(0.3, 1.6), _pos.z + rand(-0.4, 0.4));
+      Particles.spawn(_a, 0xffc040, 1, 2, 0.1, { glow: true, gravity: 0, life: 0.6 });
+    }
   }
 
   function updateDying(dt) {
@@ -1382,7 +1884,14 @@
     }
     P.phase += dt * (6 + G.speed * 0.38);
     const sw = Math.sin(P.phase);
-    if (P.sliding) {
+    if (P.grapple) {
+      // hanging from the rope: arms up, legs swinging
+      r.body.rotation.x = damp(r.body.rotation.x, -0.25, 10, dt);
+      r.body.position.y = damp(r.body.position.y, 0, 10, dt);
+      r.armL.rotation.x = 3.0; r.armR.rotation.x = 2.8;
+      r.legL.rotation.x = 0.5 + Math.sin(P.phase * 0.5) * 0.3;
+      r.legR.rotation.x = 0.2 + Math.sin(P.phase * 0.5) * 0.3;
+    } else if (P.sliding) {
       r.body.rotation.x = damp(r.body.rotation.x, 1.25, 18, dt);
       r.body.position.y = damp(r.body.position.y, 0.22, 18, dt);
       r.legL.rotation.x = 0.35; r.legR.rotation.x = 0.15;
@@ -1471,6 +1980,22 @@
     magnetRing.position.set(_pos.x, _pos.y + 0.9 + Math.sin(G.time * 5) * 0.4, _pos.z);
     magnetRing.rotation.z += dt * 4;
 
+    // ---- grappling rope: from the runner's hands to the hook ring ----
+    if (P.grapple) {
+      const c = P.grapple.c;
+      segPoint(P.seg, c.anchorS, 0, _b);
+      _b.y = c.anchorY - 0.4;
+      _a.set(_pos.x, _pos.y + 2.25, _pos.z);
+      ropeMesh.position.copy(_a);
+      _b.sub(_a);
+      const len = _b.length();
+      ropeMesh.scale.set(1, len, 1);
+      ropeMesh.quaternion.setFromUnitVectors(UP, _b.multiplyScalar(1 / len));
+      ropeMesh.visible = true;
+    } else {
+      ropeMesh.visible = false;
+    }
+
     // ---- chase trail (world positions the monkeys follow) ----
     if (state === State.PLAYING) {
       const lastT = G.trail[G.trail.length - 1];
@@ -1489,16 +2014,20 @@
       G.camYaw = damp(G.camYaw, P.yaw, 7, dt);
       G.camY = damp(G.camY, Math.max(P.y, -1) * 0.5, 6, dt);
       const fx = -Math.sin(G.camYaw), fz = -Math.cos(G.camYaw);
-      G.shake = Math.max(0, G.shake - dt);
-      const sh = G.shake * 0.6;
+      G.shake = Math.max(0, G.shake - dt * 1.4);
+      const sh = G.shake * G.shake * 0.8; // quadratic falloff feels punchier
       camera.position.set(
         _pos.x - fx * CFG.CAM_BACK + rand(-sh, sh),
         G.camY + CFG.CAM_UP + rand(-sh, sh),
         _pos.z - fz * CFG.CAM_BACK + rand(-sh, sh)
       );
       camera.lookAt(_pos.x + fx * 6, G.camY + 1.4, _pos.z + fz * 6);
-      // speed sensation: widen FOV with speed / boost
-      const fovT = G.boostT > 0 ? 80 : 65 + Math.min(8, (G.speed - CFG.BASE_SPEED) * 0.35);
+      if (sh > 0) camera.rotateZ(rand(-1, 1) * sh * 0.08); // a little roll in the shake
+      camera.rotateZ(P.lean * 0.15);                       // lean into lane changes
+      // speed sensation: FOV widens with speed, more during boost / grapple, plus decaying kicks
+      G.fovKick = damp(G.fovKick, 0, 2.5, dt);
+      const fovBase = G.boostT > 0 ? 82 : P.grapple ? 76 : 65 + Math.min(8, (G.speed - CFG.BASE_SPEED) * 0.35);
+      const fovT = fovBase + G.fovKick;
       const nf = damp(camera.fov, fovT, 3, dt);
       if (Math.abs(nf - camera.fov) > 0.01) { camera.fov = nf; camera.updateProjectionMatrix(); }
     }
@@ -1510,6 +2039,14 @@
   function animateWorld(dt) {
     const t = G.time;
     for (const seg of G.segments) {
+      updateMovers(seg);
+      if (seg !== P.seg || state !== State.PLAYING) updateCollapses(seg, dt, false);
+      for (const c of seg.canyons) {
+        c.ring.rotation.y += dt * 1.5;
+        const inRange = seg === P.seg && !P.grapple && P.s > c.s0 - CFG.GRAPPLE_RANGE && P.s < c.s0 + 4;
+        c.halo.scale.setScalar(inRange ? 1.5 + Math.sin(t * 10) * 0.25 : 1.3);
+        c.halo.lookAt(camera.position);
+      }
       for (const c of seg.coins) if (!c.taken) c.mesh.rotation.y += dt * 3.5;
       for (let i = 0; i < seg.flames.length; i++) {
         const f = seg.flames[i];
@@ -1533,6 +2070,7 @@
     ArrowLeft: 'left', KeyA: 'left', ArrowRight: 'right', KeyD: 'right',
     ArrowUp: 'up', KeyW: 'up', ArrowDown: 'down', KeyS: 'down',
     Space: 'space', Escape: 'pause', KeyP: 'pause', Enter: 'enter', KeyM: 'mute',
+    KeyE: 'grapple', ShiftLeft: 'grapple', ShiftRight: 'grapple',
   };
 
   window.addEventListener('keydown', (e) => {
@@ -1552,6 +2090,7 @@
         else if (a === 'down') slide();
         else if (a === 'left') onTurnKey(-1);
         else if (a === 'right') onTurnKey(1);
+        else if (a === 'grapple') grapple();
         else if (a === 'space') { if (!tryActivateMeter()) pauseGame(); }
         else if (a === 'pause') pauseGame();
         break;
@@ -1616,8 +2155,27 @@
       this.timerBar('pu-magnet', G.magnetT, magnetDuration());
       this.timerBar('pu-boost', G.boostT, boostDuration());
       $('pu-shield').classList.toggle('hidden', !P.shield);
+      this.set('hud-biome', BIOMES[G.biome].name);
+      const prompt = !G.dying && !P.grapple && !!grappleTarget();
+      if (this.hudCache.prompt !== prompt) { this.hudCache.prompt = prompt; $('grapple-prompt').classList.toggle('hidden', !prompt); }
       const danger = G.stumbleT > 0 ? 0.35 + 0.65 * (G.stumbleT / CFG.RECOVER_TIME) : 0;
       if (this.hudCache.danger !== danger) { this.hudCache.danger = danger; $('danger-vignette').style.opacity = danger; }
+    },
+    /** Full-screen colour flash for impacts. */
+    flash(color) {
+      const el = $('flash');
+      el.style.transition = 'none';
+      el.style.background = color;
+      el.style.opacity = 1;
+      void el.offsetWidth; // restart the fade
+      el.style.transition = 'opacity 0.45s ease-out';
+      el.style.opacity = 0;
+    },
+    bumpCoins() {
+      const el = $('hud-coins').parentElement;
+      el.classList.remove('bump');
+      void el.offsetWidth;
+      el.classList.add('bump');
     },
     timerBar(id, t, max) {
       const el = $(id);
@@ -1777,7 +2335,7 @@
 
   // Optional debug handle (open index.html?debug) for testing in the console.
   if (/[?&]debug\b/.test(location.search)) {
-    window.__ruins = { G, P, CFG, Input, getState: () => state, startGame, jump, slide, onTurnKey, activatePower, stumble };
+    window.__ruins = { G, P, CFG, Input, getState: () => state, startGame, jump, slide, onTurnKey, activatePower, stumble, grapple, grappleTarget };
   }
 
   // Boot: build the menu backdrop and show the start screen.

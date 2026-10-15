@@ -14,6 +14,7 @@ It runs entirely in the browser: plain HTML, CSS and JavaScript, with no build s
 | `↓` / `S` | Slide (fire traps); in mid-air, slams you down |
 | `←` / `→` / `A` / `D` (tap at a corner) | Turn 90° at a junction |
 | `←` / `→` / `A` / `D` (hold on a straight) | Lean / shift lanes to grab coins |
+| `E` / `Shift` | Fire the grappling hook to swing across a canyon |
 | `Space` | Use your power-up when the meter is full, otherwise pause |
 | `Esc` / `P` | Pause / resume |
 | `M` | Mute |
@@ -21,7 +22,18 @@ It runs entirely in the browser: plain HTML, CSS and JavaScript, with no build s
 
 ## Gameplay
 
-- **Track:** generated forever as straights joined by left, right and T-split junctions. It includes fallen logs, fire gates, rubble blocks, full gaps and broken half-paths. Your speed rises with distance.
+- **Track:** generated forever as straights joined by left, right and T-split junctions. Your speed rises with distance.
+- **Obstacles:**
+  - fallen logs (jump)
+  - fire gates and low branches (slide)
+  - rubble blocks (dodge)
+  - gaps and broken half-paths
+  - **swinging traps** that sweep across every lane: time your dodge, or jump at the bottom of the swing
+  - **sliding blocks** that move back and forth on a rail
+  - **collapsing floor**: cracked, glowing tiles shake and drop away just before you reach them, so jump
+- **Grappling hook:** canyons are too wide to jump. When the golden ring above one pulses and the prompt appears, press `E` or `Shift` to swing across.
+- **Biomes:** every 500 m the world changes: **Ancient Ruins → Lava Cavern → Deep Jungle**, then repeats. Each biome has its own fog, sky, lighting, stone, scenery (trees, basalt spires and embers, vines and fireflies) and its own obstacle mix. The lava has no logs but more fire and collapsing floors; the jungle has low branches, swinging logs and more canyons.
+- **Game feel:** the camera shakes and the screen flashes on stumbles and impacts. Coin pickups burst into sparkles, and the coin counter bumps with each one. The FOV widens with speed and kicks out further when you boost or grapple.
 - **Fatal vs. stumble:** hitting an obstacle head-on, falling into a gap or missing a corner ends the run. Clipping the edge of rubble, or catching a log with your feet, makes you **stumble**: you slow down and the monkeys close in. Stumble again within 5 seconds and they catch you.
 - **Coins:** Gold = 1, Red = 2, Blue = 3. Coins fill the power meter and are banked for upgrades.
 - **Power-ups** (pickups on the track, or from the meter):
