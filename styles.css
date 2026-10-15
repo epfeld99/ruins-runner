@@ -503,3 +503,7 @@ body.portrait #toast { top: 24%; }
   .tc-btn { width: 60px; height: 60px; }
   body.touch-buttons #meter-wrap { bottom: max(18px, env(safe-area-inset-bottom)); width: min(300px, 45vw); }
 }
+
+/* Speed readout turns red while the stumble penalty is active */
+#hud-speed { transition: color 0.2s ease; }
+#hud-speed.slowed { color: #ff7a6b; }

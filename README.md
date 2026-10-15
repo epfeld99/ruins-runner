@@ -48,7 +48,15 @@ The first time you start a run, the game asks for your name for the high score b
 - **Grappling hook:** canyons are too wide to jump. When the golden ring above one pulses and the prompt appears, press `E` or `Shift` to swing across.
 - **Biomes:** every 500 m the world changes: **Ancient Ruins → Lava Cavern → Deep Jungle**, then repeats. Each biome has its own fog, sky, lighting, stone, scenery (trees, basalt spires and embers, vines and fireflies) and its own obstacle mix. The lava has no logs but more fire and collapsing floors; the jungle has low branches, swinging logs and more canyons.
 - **Game feel:** the camera shakes and the screen flashes on stumbles and impacts. Coin pickups burst into sparkles, and the coin counter bumps with each one. The FOV widens with speed and kicks out further when you boost or grapple.
-- **Fatal vs. stumble:** hitting an obstacle head-on, falling into a gap or missing a corner ends the run. Clipping the edge of rubble, or catching a log with your feet, makes you **stumble**: you slow down and the monkeys close in. Stumble again within 5 seconds and they catch you.
+- **Speed:** `currentSpeed = min(maxSpeed, baseSpeed + distance × accelerationRate)` is recomputed every frame. It starts at 13 m/s (47 km/h) and reaches the 34 m/s (122 km/h) cap at about 4.7 km. The HUD shows your speed in km/h. All the tuning values live in the `SPEED` object at the top of `game.js`. As you get faster:
+  - obstacles are spaced by *time* (from about 0.95 s down to 0.7 s apart, never under 0.6 s), not by fixed metres
+  - straights get longer, so corners don't come too often
+  - you can see further ahead
+  - power-ups become more common
+  - jumps keep the same height but spend less time in the air, so a jump never sails absurdly far
+  - slides get quicker and lane-shifting gets faster
+  - coin arcs and canyon widths follow the real jump distance
+- **Fatal vs. stumble:** hitting an obstacle head-on, falling into a gap or missing a corner ends the run. Clipping the edge of rubble, or catching a log with your feet, makes you **stumble**: your speed drops back toward the base speed for 3 seconds before ramping up again (the km/h readout turns red), and the monkeys close in. Stumble again within 5 seconds and they catch you.
 - **Coins:** Gold = 1, Red = 2, Blue = 3. Coins fill the power meter and are banked for upgrades.
 - **Power-ups** (pickups on the track, or from the meter):
   - 🧲 **Coin Magnet:** pulls in nearby coins for 8s or more.

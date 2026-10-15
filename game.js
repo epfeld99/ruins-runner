@@ -52,14 +52,9 @@
     LANES: [-2, 0, 2],    // lane centres used for content placement
     STEER_SPEED: 9,       // lateral units / second while holding A/D
 
-    BASE_SPEED: 13,       // starting forward speed (units/s ≈ metres/s)
-    MAX_SPEED: 34,
-    SPEED_RAMP: 0.0045,   // speed gained per metre run
     BOOST_MUL: 1.75,
 
-    GRAVITY: 34,
-    JUMP_V: 11.5,
-    SLIDE_TIME: 0.75,
+    GRAVITY: 34,          // used for death falls; live jumps derive gravity from SPEED (below)
     COYOTE: 0.1,          // grace period to jump after leaving an edge
     JUMP_BUFFER: 0.15,    // pressing jump slightly before landing still counts
 
@@ -86,6 +81,46 @@
     GRAPPLE_ARC: 3.4,     // extra height at the top of the swing
     GRAPPLE_SPEED: 1.1,   // speed multiplier while swinging
   };
+
+  /**
+   * Forward speed & everything that scales with it.
+   *   currentSpeed = min(maxSpeed, baseSpeed + distanceTraveled * accelerationRate)
+   * Updated every frame. Physics and track generation read `speedFactor`
+   * (0 at baseSpeed … 1 at maxSpeed) so difficulty ramps smoothly.
+   */
+  const SPEED = {
+    baseSpeed: 13,            // m/s at the start line
+    maxSpeed: 34,             // hard cap (≈ 4.7 km in)
+    accelerationRate: 0.0045, // m/s gained per metre travelled
+
+    // Jumps keep the same apex height at every speed but get snappier, so a
+    // jump never carries you absurdly far and landings stay readable.
+    jumpApex: 1.94,           // metres
+    airtimeSlow: 0.68,        // seconds in the air at baseSpeed
+    airtimeFast: 0.54,        // … at maxSpeed
+    slideSlow: 0.75,          // slide duration at baseSpeed (s)
+    slideFast: 0.56,
+    steerBoost: 0.4,          // lateral speed +40% at maxSpeed
+
+    // Track generation: obstacles are spaced in *time*, not metres.
+    gapTimeSlow: 0.95,        // seconds between obstacles at baseSpeed
+    gapTimeFast: 0.7,         // … at maxSpeed
+    minReaction: 0.6,         // never closer than this many seconds apart
+    segmentStretch: 0.6,      // straights up to 60% longer at maxSpeed (turns stay well-paced)
+    fogStretch: 35,           // extra view distance at maxSpeed
+
+    // Stumble penalty: drop back toward baseSpeed, hold, then ramp back up.
+    stumblePenaltyTime: 3,    // seconds held at the reduced speed
+    penaltyDrop: 8,           // how fast speed falls on a stumble (damping rate)
+    recoverRate: 1.2,         // how fast it ramps back afterwards
+  };
+  /** The speed earned by distance — the spec formula. */
+  const rampSpeed = (d) => Math.min(SPEED.maxSpeed, SPEED.baseSpeed + Math.max(0, d) * SPEED.accelerationRate);
+  /** 0 at baseSpeed … 1 at maxSpeed. */
+  const speedFactor = (v) => Math.min(1, Math.max(0, (v - SPEED.baseSpeed) / (SPEED.maxSpeed - SPEED.baseSpeed)));
+  /** Reduced speed after a stumble: most of the way back to baseSpeed (always a noticeable drop). */
+  const penaltySpeed = (earned) => Math.max(SPEED.baseSpeed * 0.8, Math.min(earned * 0.7, SPEED.baseSpeed + 0.3 * (earned - SPEED.baseSpeed)));
+  const lerpN = (a, b, t) => a + (b - a) * t;
 
   const State = { START: 'START', PLAYING: 'PLAYING', PAUSED: 'PAUSED', GAMEOVER: 'GAMEOVER' };
   let state = State.START;
@@ -586,7 +621,21 @@
   const magnetDuration = () => CFG.MAGNET_TIME + 2 * upg('magnet') + (Save.data.character === 'mara' ? 2 : 0);
   const boostDuration = () => CFG.BOOST_TIME + upg('boost');
   const meterMax = () => Math.round(CFG.METER_BASE * (1 - 0.12 * upg('meter')) * (Save.data.character === 'zara' ? 0.8 : 1));
-  const jumpMul = () => (Save.data.character === 'kenji' ? 1.06 : 1); // sqrt(1.12) on velocity ≈ 12% higher apex
+  const jumpApexMul = () => (Save.data.character === 'kenji' ? 1.12 : 1); // Kenji jumps 12% higher
+
+  /**
+   * Jump velocity + gravity for the current speed. From apex h and airtime T:
+   *   g = 8h / T²,  v = 4h / T
+   */
+  function jumpPhysics() {
+    const T = lerpN(SPEED.airtimeSlow, SPEED.airtimeFast, speedFactor(G.currentSpeed));
+    const h = SPEED.jumpApex * jumpApexMul();
+    return { v: 4 * h / T, g: 8 * h / (T * T), T };
+  }
+  const slideTime = () => lerpN(SPEED.slideSlow, SPEED.slideFast, speedFactor(G.currentSpeed));
+  const steerSpeed = () => CFG.STEER_SPEED * (1 + SPEED.steerBoost * speedFactor(G.currentSpeed));
+  /** Half-length of a coin arc that matches the real jump at that speed. */
+  const arcHalf = (speed) => clamp(lerpN(SPEED.airtimeSlow, SPEED.airtimeFast, speedFactor(speed)) * speed * 0.45, 4, 8);
 
   /* =======================================================================
    * 9. 3D MODELS — runner & demon monkeys (built from primitives)
@@ -698,7 +747,7 @@
   const P = {
     seg: null, s: 0, x: 0, y: 0, vy: 0,
     onGround: true, falling: false, coyote: 0, jumpBuffer: 0, fastFall: false, slideQueued: false,
-    sliding: false, slideT: 0,
+    sliding: false, slideT: 0, g: CFG.GRAVITY,
     yaw: 0, yawVis: 0, lean: 0,
     visOff: new THREE.Vector3(), // decays to 0, smooths snaps on turns
     shield: false, phase: 0,
@@ -710,7 +759,9 @@
   const G = {
     segments: [],
     distance: 0, coins: 0, score: 0, mult: 1,
-    baseSpeed: CFG.BASE_SPEED, speed: CFG.BASE_SPEED, speedMul: 1,
+    currentSpeed: SPEED.baseSpeed, // running speed (spec): ramps with distance
+    speed: SPEED.baseSpeed,        // actual movement speed (currentSpeed × boost)
+    penaltyT: 0,                   // stumble penalty time left
     meter: 0, meterMax: CFG.METER_BASE,
     magnetT: 0, boostT: 0, invulnT: 0,
     stumbleT: 0, chase: 3, introT: 3,
@@ -742,7 +793,7 @@
     const seg = {
       start: start.clone(), dir, first, d0, biome, B: BIOMES[biome],
       fwd: DIRS[dir], right: DIRS[(dir + 1) % 4],
-      L: first ? 120 : randInt(75, 135),
+      L: first ? 120 : Math.round(randInt(75, 135) * (1 + SPEED.segmentStretch * speedFactor(rampSpeed(d0)))),
       junction: weighted([['L', 3], ['R', 3], ['T', 2]]),
       obstacles: [], coins: [], pickups: [], gaps: [], halfGaps: [], flames: [], geos: [],
       movers: [], collapses: [], canyons: [],
@@ -968,7 +1019,7 @@
       sec.tiles.push({ s0: t0, s1: t0 + len, cracked: isCracked, mesh: m, state: 'solid', t: 0, vy: 0 });
     }
     seg.collapses.push(sec);
-    coinArc(seg, pick(CFG.LANES), s + (first + cracked / 2) * len, 4.5, 6, 1.5);
+    coinArc(seg, pick(CFG.LANES), s + (first + cracked / 2) * len, arcHalf(speed), 6, 1.5);
     return n * len;
   }
 
@@ -1012,7 +1063,7 @@
     return len;
   }
   /** Canyon width grows with speed so it always out-ranges a normal jump. */
-  const canyonLength = (speed) => clamp(speed * 1.05, 14, 32);
+  const canyonLength = (speed) => clamp(Math.max(speed * 1.05, lerpN(SPEED.airtimeSlow, SPEED.airtimeFast, speedFactor(speed)) * speed + 6), 14, 32);
 
   /** Rubble block filling one lane — dodge sideways or jump. */
   function addRock(seg, s, lane) {
@@ -1037,19 +1088,23 @@
   function populateSegment(seg) {
     // Difficulty and speed estimated for when the runner will actually get here.
     const diff = clamp(seg.d0 / 2500, 0, 1);
-    const speed = Math.min(CFG.MAX_SPEED, CFG.BASE_SPEED + seg.d0 * CFG.SPEED_RAMP);
+    const speed = rampSpeed(seg.d0);   // what currentSpeed will be when the runner gets here
+    const f = speedFactor(speed);
+    const gapTime = lerpN(SPEED.gapTimeSlow, SPEED.gapTimeFast, f);
+    const arc = arcHalf(speed);
     const W = seg.B.weights;
     let s = seg.first ? 45 : 22;
     const end = seg.L - 18;
 
     while (true) {
-      s += Math.max(speed * 0.85, 11) * rand(1.0, 1.7 - diff * 0.5);
+      // gap between obstacles, in seconds of running → metres (never below a fair reaction time)
+      s += Math.max(speed * gapTime, speed * SPEED.minReaction, 11) * rand(1.0, 1.6 - 0.3 * f);
       if (s > end) break;
       let type = weighted([
         ['log', W.log], ['overhead', W.overhead], ['rock', W.rock],
         ['gap', diff > 0.04 ? W.gap : W.gap * 0.3], ['halfgap', W.halfgap],
         ['swing', W.swing], ['slider', W.slider], ['collapse', W.collapse], ['canyon', W.canyon],
-        ['coins', W.coins - diff], ['powerup', W.powerup],
+        ['coins', (W.coins - diff) * (1 - 0.4 * f)], ['powerup', W.powerup * (1 + f)], // more help when it's fast
       ]);
       // long features must fit before the junction
       if (type === 'canyon' && s + canyonLength(speed) + 4 > end) type = 'coins';
@@ -1058,7 +1113,7 @@
       switch (type) {
         case 'log':
           addLog(seg, s);
-          if (Math.random() < 0.6) coinArc(seg, CFG.LANES[lane], s);
+          if (Math.random() < 0.6) coinArc(seg, CFG.LANES[lane], s, arc);
           s += 1;
           break;
         case 'overhead':
@@ -1078,7 +1133,7 @@
         case 'gap': {
           const len = rand(2.8, 3.6 + diff * 1.2);
           seg.gaps.push({ s0: s, s1: s + len });
-          if (Math.random() < 0.7) coinArc(seg, CFG.LANES[lane], s + len / 2, 5, 7, 1.4);
+          if (Math.random() < 0.7) coinArc(seg, CFG.LANES[lane], s + len / 2, arc, 7, 1.4);
           s += len;
           break;
         }
@@ -1095,13 +1150,15 @@
           addSwing(seg, s, ph);
           coinLine(seg, CFG.LANES[lane], s - 4, 5);
           // later on: a second trap swinging in opposition — no safe lane to wait in
-          if (diff > 0.25 && s + 7 < end) { addSwing(seg, s + 6, ph + Math.PI); s += 6; }
+          // (spaced in time so each one can be dodged on its own, even at top speed)
+          const pairGap = Math.max(6, speed * 0.45);
+          if (diff > 0.25 && s + pairGap + 1 < end) { addSwing(seg, s + pairGap, ph + Math.PI); s += pairGap; }
           s += 1;
           break;
         }
         case 'slider':
           addSlider(seg, s);
-          coinArc(seg, 0, s, 4, 5, 1.6);
+          coinArc(seg, 0, s, arc * 0.85, 5, 1.6);
           s += 1.5;
           break;
         case 'collapse':
@@ -1322,7 +1379,7 @@
     scene.background.lerp(_col.setHex(B.fog), k);
     scene.fog.color.copy(scene.background);
     scene.fog.near += (B.near - scene.fog.near) * k;
-    scene.fog.far += (B.far - scene.fog.far) * k;
+    scene.fog.far += (B.far + SPEED.fogStretch * speedFactor(G.currentSpeed) - scene.fog.far) * k;
     jungleFloor.material.color.lerp(_col.setHex(B.ground), k);
     jungleFloor.material.emissive.lerp(_col.setHex(B.groundGlow), k);
     hemi.color.lerp(_col.setHex(B.sky), k);
@@ -1340,7 +1397,7 @@
 
     Object.assign(G, {
       distance: 0, coins: 0, score: 0, mult: 1 + upg('multi'),
-      baseSpeed: CFG.BASE_SPEED, speed: CFG.BASE_SPEED, speedMul: 1,
+      currentSpeed: SPEED.baseSpeed, speed: SPEED.baseSpeed, penaltyT: 0,
       meter: 0, meterMax: meterMax(),
       magnetT: 0, boostT: 0, invulnT: 0,
       stumbleT: 0, chase: 2, introT: 3,
@@ -1458,7 +1515,8 @@
     if (G.dying || P.grapple) return;
     const canCoyote = P.falling && P.coyote > 0;
     if (P.onGround || canCoyote) {
-      P.vy = CFG.JUMP_V * jumpMul();
+      const jp = jumpPhysics();
+      P.vy = jp.v; P.g = jp.g;
       P.onGround = false; P.falling = false; P.coyote = 0;
       P.sliding = false; P.slideQueued = false; P.fastFall = false;
       Sfx.jump();
@@ -1471,7 +1529,7 @@
     if (G.dying || P.grapple) return;
     if (P.onGround) {
       P.sliding = true;
-      P.slideT = CFG.SLIDE_TIME;
+      P.slideT = slideTime();
       Sfx.slide();
     } else if (!P.falling) {
       // in the air: slam down, then slide on landing
@@ -1517,6 +1575,7 @@
     if (t >= 1) {
       P.grapple = null;
       P.vy = 3;
+      P.g = jumpPhysics().g;
       P.onGround = false; P.falling = false;
       G.shake = Math.max(G.shake, 0.2);
     }
@@ -1635,7 +1694,8 @@
       } else if (reason === 'fall') {
         // bounce back up and drift to solid ground
         P.y = Math.max(P.y, -0.3);
-        P.vy = CFG.JUMP_V * 1.15;
+        const jp = jumpPhysics();
+        P.vy = jp.v * 1.15; P.g = jp.g;
         P.onGround = false; P.falling = false;
         for (const h of P.seg.halfGaps) if (P.s > h.s0 - 1 && P.s < h.s1) P.x = -h.side * 1.6;
       }
@@ -1656,7 +1716,7 @@
   /** Minor mistake: slow down, monkeys close in. Second one = caught. */
   function stumble() {
     if (G.dying || G.invulnT > 0 || G.boostT > 0) return;
-    G.speedMul = 0.55;
+    G.penaltyT = SPEED.stumblePenaltyTime; // drop toward baseSpeed for 3s, then ramp back
     G.shake = 0.55;
     UI.flash('rgba(255,120,40,0.35)');
     getRunnerWorld(_a); _a.y += 0.3;
@@ -1685,11 +1745,11 @@
     const steer = steerInput();
     if (steer !== 0) {
       P.laneTarget = null;
-      P.x += steer * CFG.STEER_SPEED * h;
+      P.x += steer * steerSpeed() * h;
     } else if (P.laneTarget !== null) {
       // a swipe on a straight: glide one lane over
       const d = P.laneTarget - P.x;
-      const step = CFG.STEER_SPEED * 1.3 * h;
+      const step = steerSpeed() * 1.3 * h;
       if (Math.abs(d) <= step) { P.x = P.laneTarget; P.laneTarget = null; } else P.x += Math.sign(d) * step;
     }
     P.x = clamp(P.x, -CFG.LANE_LIMIT, CFG.LANE_LIMIT);
@@ -1697,10 +1757,10 @@
     // ---- vertical motion / gaps ----
     const hasFloor = G.boostT > 0 || floorAt(seg, P.s, P.x);
     if (P.onGround) {
-      if (!hasFloor) { P.onGround = false; P.falling = true; P.vy = 0; P.coyote = CFG.COYOTE; P.sliding = false; }
+      if (!hasFloor) { P.onGround = false; P.falling = true; P.vy = 0; P.g = jumpPhysics().g; P.coyote = CFG.COYOTE; P.sliding = false; }
     } else {
       P.coyote -= h;
-      P.vy -= CFG.GRAVITY * (P.fastFall ? 2.4 : 1) * h;
+      P.vy -= P.g * (P.fastFall ? 2.4 : 1) * h;
       P.y += P.vy * h;
       if (P.y <= 0) {
         if (hasFloor && P.y > -0.35) {
@@ -1826,9 +1886,13 @@
     if (G.dying) { updateDying(dt); updateVisuals(dt); return; }
 
     // ---- speed ----
-    G.baseSpeed = Math.min(CFG.MAX_SPEED, CFG.BASE_SPEED + G.distance * CFG.SPEED_RAMP);
-    G.speedMul = damp(G.speedMul, 1, 1.3, dt);
-    G.speed = G.baseSpeed * G.speedMul * (G.boostT > 0 ? CFG.BOOST_MUL : 1);
+    // currentSpeed = min(maxSpeed, baseSpeed + distance × accelerationRate), every frame.
+    // After a stumble it's held near baseSpeed for 3s, then eases back up.
+    const earned = rampSpeed(G.distance);
+    let speedTarget = earned;
+    if (G.penaltyT > 0) { G.penaltyT = Math.max(0, G.penaltyT - dt); speedTarget = penaltySpeed(earned); }
+    G.currentSpeed = damp(G.currentSpeed, speedTarget, speedTarget < G.currentSpeed ? SPEED.penaltyDrop : SPEED.recoverRate, dt);
+    G.speed = Math.min(G.currentSpeed * (G.boostT > 0 ? CFG.BOOST_MUL : 1), SPEED.maxSpeed * 1.5);
 
     // ---- physics in fixed-size sub-steps ----
     const steps = Math.max(1, Math.ceil(dt / CFG.SUBSTEP));
@@ -2075,7 +2139,7 @@
       camera.rotateZ(P.lean * 0.15);                       // lean into lane changes
       // speed sensation: FOV widens with speed, more during boost / grapple, plus decaying kicks
       G.fovKick = damp(G.fovKick, 0, 2.5, dt);
-      const fovBase = G.boostT > 0 ? 82 : P.grapple ? 76 : 65 + Math.min(8, (G.speed - CFG.BASE_SPEED) * 0.35);
+      const fovBase = G.boostT > 0 ? 82 : P.grapple ? 76 : 65 + 8 * speedFactor(G.currentSpeed);
       const fovT = fovBase + G.fovKick;
       const nf = damp(camera.fov, fovT * View.fovScale, 3, dt);
       if (Math.abs(nf - camera.fov) > 0.01) { camera.fov = nf; camera.updateProjectionMatrix(); }
@@ -2368,6 +2432,9 @@
       this.set('hud-distance', Math.floor(G.distance).toLocaleString());
       this.set('hud-coins', G.coins.toLocaleString());
       this.set('hud-mult', 'x' + G.mult);
+      this.set('hud-speed', Math.round(G.speed * 3.6) + ' km/h');
+      const slowed = G.penaltyT > 0;
+      if (this.hudCache.slowed !== slowed) { this.hudCache.slowed = slowed; $('hud-speed').classList.toggle('slowed', slowed); }
       const pct = Math.round((G.meter / G.meterMax) * 100);
       if (this.hudCache.meter !== pct) {
         this.hudCache.meter = pct;
@@ -2596,7 +2663,7 @@
 
   // Optional debug handle (open index.html?debug) for testing in the console.
   if (/[?&]debug\b/.test(location.search)) {
-    window.__ruins = { G, P, CFG, Input, getState: () => state, startGame, jump, slide, onTurnKey, activatePower, stumble, grapple, grappleTarget, Touch, Tilt, View };
+    window.__ruins = { G, P, CFG, Input, getState: () => state, startGame, jump, slide, onTurnKey, activatePower, stumble, grapple, grappleTarget, Touch, Tilt, View, SPEED, jumpPhysics, rampSpeed };
   }
 
   // Name overlay form (Enter or the button submits)
