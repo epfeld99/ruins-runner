@@ -2,7 +2,11 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+  <meta name="theme-color" content="#0d0b07" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <title>Ruins Runner</title>
   <meta name="description" content="A browser-based 3D endless runner: escape the Demon Monkeys through ancient jungle ruins." />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -40,11 +44,23 @@
       <div id="meter-wrap">
         <div id="meter-label">POWER · <span id="meter-power-name">BOOST</span></div>
         <div id="meter"><div id="meter-fill"></div></div>
-        <div id="meter-hint">PRESS SPACE!</div>
+        <div id="meter-hint"><span class="kb-only">PRESS SPACE!</span><span class="touch-only">TAP HERE!</span></div>
       </div>
 
       <div id="toast"></div>
-      <div id="grapple-prompt" class="hidden">🪝 Press <kbd>E</kbd> / <kbd>Shift</kbd> to GRAPPLE!</div>
+      <div id="grapple-prompt" class="hidden"><span class="kb-only">🪝 Press <kbd>E</kbd> / <kbd>Shift</kbd> to GRAPPLE!</span><span class="touch-only">🪝 TAP TO GRAPPLE!</span></div>
+
+      <!-- On-screen fallback controls (Settings → On-screen buttons) -->
+      <div id="touch-controls" aria-hidden="true">
+        <div class="tc-cluster tc-left">
+          <button class="tc-btn" id="tc-left" aria-label="Turn / steer left">◀</button>
+          <button class="tc-btn" id="tc-right" aria-label="Turn / steer right">▶</button>
+        </div>
+        <div class="tc-cluster tc-right">
+          <button class="tc-btn" id="tc-jump" aria-label="Jump">▲</button>
+          <button class="tc-btn" id="tc-slide" aria-label="Slide">▼</button>
+        </div>
+      </div>
     </div>
 
     <!-- ========================= START MENU ========================= -->
@@ -61,8 +77,17 @@
           <button class="btn" data-action="characters">Character Select</button>
           <button class="btn" data-action="upgrades">Power-up Upgrades</button>
           <button class="btn" data-action="scores">High Scores</button>
+          <button class="btn" data-action="settings">⚙ Settings</button>
         </div>
-        <div class="controls">
+        <div class="controls touch-only-grid">
+          <div><span class="gesture">↑</span><span>Swipe up · Jump</span></div>
+          <div><span class="gesture">↓</span><span>Swipe down · Slide</span></div>
+          <div><span class="gesture">⇆</span><span>Swipe · Turn / change lane</span></div>
+          <div><span class="gesture">✋</span><span>Hold left / right side · Steer</span></div>
+          <div><span class="gesture">👆</span><span>Tap · Grapple / use power</span></div>
+          <div><span class="gesture">❚❚</span><span>Top-right · Pause</span></div>
+        </div>
+        <div class="controls kb-only-grid">
           <div><kbd>↑</kbd><kbd>W</kbd><span>Jump</span></div>
           <div><kbd>↓</kbd><kbd>S</kbd><span>Slide</span></div>
           <div><kbd>←</kbd><kbd>→</kbd><span>Turn at corners</span></div>
@@ -71,7 +96,37 @@
           <div><kbd>E</kbd><kbd>Shift</kbd><span>Grappling hook (canyons)</span></div>
           <div><kbd>Esc</kbd><kbd>M</kbd><span>Pause · Mute</span></div>
         </div>
-        <p class="hint">Press <kbd>Enter</kbd> to start</p>
+        <p class="hint kb-only">Press <kbd>Enter</kbd> to start</p>
+      </div>
+    </div>
+
+    <!-- ========================== SETTINGS ========================== -->
+    <div id="screen-settings" class="screen hidden">
+      <div class="panel">
+        <h2>Settings</h2>
+        <div class="settings-list">
+          <button class="setting" data-action="edit-name"><span>Player name</span><b id="set-name">—</b></button>
+          <button class="setting toggle" data-action="toggle-buttons"><span>On-screen buttons<small>Jump / slide / turn pads for touch screens</small></span><b id="set-buttons">Off</b></button>
+          <button class="setting toggle" data-action="toggle-tilt"><span>Tilt steering<small>Lean the device to shift lanes (phones &amp; tablets)</small></span><b id="set-tilt">Off</b></button>
+          <button class="setting toggle" data-action="toggle-mute"><span>Sound</span><b id="set-sound">On</b></button>
+        </div>
+        <button class="btn" data-action="back">← Back</button>
+      </div>
+    </div>
+
+    <!-- ======================== NAME OVERLAY ======================== -->
+    <div id="screen-name" class="screen hidden">
+      <div class="panel">
+        <h2>Who's Running?</h2>
+        <p class="sub">Your name goes on the high score board.</p>
+        <form id="name-form" autocomplete="off">
+          <input id="name-input" type="text" maxlength="14" placeholder="Your name" enterkeyhint="go"
+                 autocapitalize="words" autocorrect="off" spellcheck="false" aria-label="Player name" />
+          <div class="menu-buttons">
+            <button class="btn btn-primary" type="submit">✔ Save</button>
+            <button class="btn" type="button" data-action="name-skip">Skip</button>
+          </div>
+        </form>
       </div>
     </div>
 
@@ -122,7 +177,7 @@
           <button class="btn" data-action="toggle-mute" id="btn-mute">🔊 Sound: On</button>
           <button class="btn" data-action="menu">Main Menu</button>
         </div>
-        <p class="hint">Press <kbd>Space</kbd> or <kbd>Esc</kbd> to resume</p>
+        <p class="hint kb-only">Press <kbd>Space</kbd> or <kbd>Esc</kbd> to resume</p>
       </div>
     </div>
 
@@ -142,7 +197,7 @@
           <button class="btn btn-primary" data-action="restart">↻ Play Again</button>
           <button class="btn" data-action="menu">Main Menu</button>
         </div>
-        <p class="hint">Press <kbd>Enter</kbd> to play again</p>
+        <p class="hint kb-only">Press <kbd>Enter</kbd> to play again</p>
       </div>
     </div>
 

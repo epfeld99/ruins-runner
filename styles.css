@@ -30,15 +30,35 @@ html, body {
   font-family: var(--font-body);
   user-select: none;
   -webkit-user-select: none;
+  -webkit-touch-callout: none;          /* no iOS long-press callouts */
+  -webkit-tap-highlight-color: transparent;
+  overscroll-behavior: none;            /* no pull-to-refresh / bounce */
+  -webkit-text-size-adjust: 100%;
 }
+/* Pin the page so iOS Safari can't rubber-band scroll it */
+body { position: fixed; inset: 0; }
 
-#game-root { position: fixed; inset: 0; }
+#game-root { position: fixed; inset: 0; overflow: hidden; }
 
+/* Fill the whole screen; dvh tracks the visible area as mobile URL bars show/hide */
 #game-canvas {
   display: block;
-  width: 100%;
-  height: 100%;
+  position: absolute;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  height: 100dvh;
+  object-fit: cover;
+  touch-action: none;                   /* we handle every gesture ourselves */
 }
+
+/* Keyboard vs touch specific bits */
+.touch-only, .touch-only-grid { display: none; }
+body.touch .touch-only { display: inline; }
+body.touch .touch-only-grid { display: grid; }
+body.touch .kb-only, body.touch .kb-only-grid { display: none; }
+
+button { touch-action: manipulation; }  /* no double-tap zoom delay on buttons */
 
 .hidden { display: none !important; }
 
@@ -54,6 +74,11 @@ html, body {
   padding: 16px;
   background: radial-gradient(ellipse at center, rgba(0,0,0,0.15) 0%, rgba(0,0,0,0.55) 100%);
   overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  touch-action: pan-y;                  /* menus may scroll on short screens */
+  overscroll-behavior: contain;
+  padding: max(16px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right))
+           max(16px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
   z-index: 10;
 }
 
@@ -237,14 +262,14 @@ kbd {
 /* ------------------------------------------------------------------ */
 /* HUD                                                                 */
 /* ------------------------------------------------------------------ */
-#hud { position: absolute; inset: 0; pointer-events: none; z-index: 5; }
+#hud { position: absolute; inset: 0; pointer-events: none; z-index: 5; touch-action: none; }
 
-.hud-left { position: absolute; top: 16px; left: 20px; text-shadow: 0 2px 6px rgba(0,0,0,0.7); }
+.hud-left { position: absolute; top: max(16px, env(safe-area-inset-top)); left: max(20px, env(safe-area-inset-left)); text-shadow: 0 2px 6px rgba(0,0,0,0.7); }
 .hud-label { font-size: 12px; letter-spacing: 3px; color: var(--muted); font-weight: 800; }
 #hud-score { font-family: var(--font-display); font-size: 40px; font-weight: 900; color: var(--gold); line-height: 1; }
 .hud-sub { font-size: 16px; font-weight: 800; margin-top: 2px; }
 
-.hud-right { position: absolute; top: 16px; right: 20px; display: flex; gap: 12px; align-items: center; }
+.hud-right { position: absolute; top: max(16px, env(safe-area-inset-top)); right: max(20px, env(safe-area-inset-right)); display: flex; gap: 12px; align-items: center; }
 .coin-box {
   display: flex; align-items: center; gap: 8px;
   background: rgba(0,0,0,0.45);
@@ -288,7 +313,10 @@ kbd {
 .pu-label { font-size: 12px; font-weight: 900; color: var(--blue); letter-spacing: 1px; }
 
 #meter-wrap {
-  position: absolute; bottom: 22px; left: 50%;
+  position: absolute; bottom: max(22px, env(safe-area-inset-bottom)); left: 50%;
+  pointer-events: auto;               /* tap / click the full meter to fire it */
+  cursor: pointer;
+  touch-action: none;
   transform: translateX(-50%);
   width: min(360px, 70vw);
   text-align: center;
@@ -349,6 +377,9 @@ kbd {
   color: var(--gold);
   white-space: nowrap;
   animation: pulse 0.35s ease-in-out infinite alternate;
+  pointer-events: auto;                 /* tappable on touch screens */
+  touch-action: none;
+  cursor: pointer;
 }
 
 .coin-box.bump { animation: bump 0.18s ease-out; }
@@ -368,4 +399,107 @@ kbd {
   .panel { padding: 22px 18px; }
   .controls { grid-template-columns: 1fr; }
   #hud-score { font-size: 30px; }
+}
+
+/* ------------------------------------------------------------------ */
+/* Settings + name overlay                                             */
+/* ------------------------------------------------------------------ */
+.settings-list { display: flex; flex-direction: column; gap: 10px; margin: 12px 0 18px; }
+.setting {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  width: 100%; min-height: 56px;
+  padding: 10px 16px;
+  border-radius: 12px;
+  border: 2px solid rgba(255,255,255,0.1);
+  background: rgba(255,255,255,0.05);
+  color: var(--text);
+  font: 700 16px var(--font-body);
+  text-align: left;
+  cursor: pointer;
+}
+.setting small { display: block; font-weight: 400; font-size: 12px; color: var(--muted); }
+.setting b { color: var(--muted); min-width: 40px; text-align: right; }
+.setting.toggle.on b { color: var(--ok); }
+.setting:hover { border-color: var(--gold); }
+.muted { color: var(--muted); }
+
+#name-input {
+  width: 100%;
+  font: 800 22px var(--font-body);
+  padding: 14px 16px;
+  margin-bottom: 14px;
+  border-radius: 12px;
+  border: 2px solid var(--panel-edge);
+  background: rgba(0,0,0,0.4);
+  color: var(--text);
+  text-align: center;
+  user-select: text; -webkit-user-select: text;
+  touch-action: manipulation;
+}
+#name-input:focus { outline: none; border-color: var(--gold); }
+
+/* ------------------------------------------------------------------ */
+/* On-screen touch controls                                            */
+/* ------------------------------------------------------------------ */
+#touch-controls { display: none; }
+body.touch-buttons #touch-controls { display: block; }
+.tc-cluster {
+  position: absolute;
+  bottom: max(18px, env(safe-area-inset-bottom));
+  display: flex; gap: 12px;
+}
+.tc-cluster.tc-left { left: max(16px, env(safe-area-inset-left)); }
+.tc-cluster.tc-right { right: max(16px, env(safe-area-inset-right)); flex-direction: column-reverse; }
+.tc-btn {
+  pointer-events: auto;
+  touch-action: none;
+  width: 68px; height: 68px;
+  border-radius: 50%;
+  border: 2px solid rgba(255,255,255,0.35);
+  background: rgba(0,0,0,0.28);
+  color: rgba(255,255,255,0.85);
+  font-size: 24px;
+  backdrop-filter: blur(2px);
+  -webkit-user-select: none; user-select: none;
+  transition: transform 0.06s ease, background 0.1s ease;
+}
+.tc-btn.pressed { background: rgba(245,197,66,0.45); border-color: var(--gold); transform: scale(0.92); }
+/* keep the power meter clear of the pads */
+body.touch-buttons #meter-wrap { bottom: calc(max(18px, env(safe-area-inset-bottom)) + 92px); }
+
+/* ------------------------------------------------------------------ */
+/* Touch devices: thumb-friendly sizes                                 */
+/* ------------------------------------------------------------------ */
+body.touch .btn { min-height: 56px; font-size: 18px; }
+body.touch .btn-small { min-height: 48px; font-size: 16px; padding: 10px 16px; }
+body.touch .btn-primary { min-height: 62px; font-size: 20px; }
+body.touch .pause-btn { width: 56px; height: 56px; font-size: 18px; border-radius: 14px; }
+body.touch .controls { font-size: 14px; }
+.gesture {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 28px; height: 28px; border-radius: 8px;
+  background: #2d2416; border: 1px solid #5c4b2c;
+  color: var(--gold); font-weight: 900;
+}
+body.touch #meter { height: 18px; border-radius: 9px; }
+
+/* Portrait phones: tighter HUD; meter sits above the stacked jump/slide pads */
+body.portrait.touch-buttons #meter-wrap { bottom: calc(max(18px, env(safe-area-inset-bottom)) + 170px); width: min(320px, 76vw); }
+body.portrait #hud-score { font-size: 30px; }
+body.portrait .hud-sub { font-size: 14px; }
+body.portrait #hud-powerups { top: calc(max(16px, env(safe-area-inset-top)) + 70px); }
+body.portrait #grapple-prompt { font-size: 16px; top: 34%; }
+body.portrait #toast { top: 24%; }
+
+/* Short landscape phones: compact menus so buttons stay reachable */
+@media (max-height: 520px) {
+  .panel { padding: 14px 20px; }
+  h1.title { font-size: 34px; }
+  .menu-stats { margin: 4px 0 10px; }
+  .menu-buttons { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .menu-buttons .btn-primary { grid-column: 1 / -1; }
+  .controls { display: none !important; }
+  .tagline small { display: none; }
+  .tc-btn { width: 60px; height: 60px; }
+  body.touch-buttons #meter-wrap { bottom: max(18px, env(safe-area-inset-bottom)); width: min(300px, 45vw); }
 }

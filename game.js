@@ -13,6 +13,7 @@
  *   G           per-run game state (score, coins, timers, chase distance…)
  *   UI          DOM menus / HUD
  *   state       START | PLAYING | PAUSED | GAMEOVER
+ *   Touch       swipe / hold / tap gestures, optional tilt + on-screen buttons
  *
  * Track model
  *   The track is a chain of straight segments, each ending in a junction
@@ -98,6 +99,7 @@
   const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
   /** Frame-rate independent exponential smoothing. */
   const damp = (a, b, k, dt) => a + (b - a) * (1 - Math.exp(-k * dt));
+  const escapeHTML = (str) => String(str).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   /** Pick from [[value, weight], …] */
   function weighted(entries) {
     let total = 0;
@@ -128,6 +130,9 @@
         unlocked: ['jack'],
         meterPower: 'boost',
         muted: false,
+        playerName: '',       // asked for on the first run (name overlay)
+        touchButtons: null,   // null = auto (on for touch devices)
+        tilt: false,          // device-tilt steering
       };
     },
     load() {
@@ -264,10 +269,15 @@
   /* =======================================================================
    * 5. RENDERER, SCENE, CAMERA, LIGHTS
    * ===================================================================== */
+  // Touch-first device? (phones / tablets) — drives UI layout, pixel ratio and defaults.
+  const IS_TOUCH = /[?&]touch\b/.test(location.search) ||
+    (window.matchMedia && window.matchMedia('(pointer: coarse)').matches) || navigator.maxTouchPoints > 0 && !window.matchMedia('(pointer: fine)').matches;
+  if (IS_TOUCH) document.body.classList.add('touch');
+
   const canvas = $('game-canvas');
   const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
-  renderer.setSize(window.innerWidth, window.innerHeight);
+  // Phones have very high DPRs; cap lower there to hold 60 FPS.
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, IS_TOUCH ? 1.5 : 2));
 
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(CFG.FOG_COLOR);
@@ -290,11 +300,30 @@
   jungleFloor.position.y = -30;
   scene.add(jungleFloor);
 
-  window.addEventListener('resize', () => {
-    camera.aspect = window.innerWidth / window.innerHeight;
+  /**
+   * Viewport-dependent camera settings. In portrait the horizontal view gets
+   * very narrow, so we widen the vertical FOV and pull the camera back/up to
+   * keep all three lanes and the turns visible.
+   */
+  const View = { back: CFG.CAM_BACK, up: CFG.CAM_UP, fovScale: 1 };
+  function fitViewport() {
+    const w = canvas.clientWidth || window.innerWidth;
+    const h = canvas.clientHeight || window.innerHeight;
+    const aspect = w / h;
+    const p = clamp((1.15 - aspect) / 0.7, 0, 1); // 0 = landscape … 1 = tall portrait phone
+    View.fovScale = 1 + 0.42 * p;
+    View.back = CFG.CAM_BACK + 1.8 * p;
+    View.up = CFG.CAM_UP + 1.2 * p;
+    camera.aspect = aspect;
+    camera.fov = 65 * View.fovScale;
     camera.updateProjectionMatrix();
-    renderer.setSize(window.innerWidth, window.innerHeight);
-  });
+    renderer.setSize(w, h, false); // CSS controls the displayed size
+    document.body.classList.toggle('portrait', aspect < 1);
+  }
+  window.addEventListener('resize', fitViewport);
+  window.addEventListener('orientationchange', () => setTimeout(fitViewport, 250));
+  if (window.visualViewport) window.visualViewport.addEventListener('resize', fitViewport);
+  fitViewport();
 
   /* =======================================================================
    * 6. PROCEDURAL TEXTURES, MATERIALS & SHARED GEOMETRY
@@ -674,6 +703,7 @@
     visOff: new THREE.Vector3(), // decays to 0, smooths snaps on turns
     shield: false, phase: 0,
     grapple: null, // { c: canyon, sStart, sEnd, y0 } while swinging
+    laneTarget: null, // lane x to glide to after a touch swipe
   };
 
   /** Per-run state. */
@@ -1320,7 +1350,7 @@
     Object.assign(P, {
       s: 0, x: 0, y: 0, vy: 0, onGround: true, falling: false, coyote: 0, jumpBuffer: 0,
       fastFall: false, slideQueued: false, sliding: false, slideT: 0,
-      yaw: 0, yawVis: 0, lean: 0, shield: upg('shieldStart') > 0, phase: 0, grapple: null,
+      yaw: 0, yawVis: 0, lean: 0, shield: upg('shieldStart') > 0, phase: 0, grapple: null, laneTarget: null,
     });
     P.visOff.set(0, 0, 0);
     ropeMesh.visible = false;
@@ -1339,9 +1369,17 @@
     updateVisuals(0);
   }
 
+  /** Start, but ask for the player's name first if we don't have one yet. */
+  function requestStart() {
+    if (!Save.data.playerName) { UI.showNameOverlay(true); return; }
+    startGame();
+  }
+
   function startGame() {
     Sfx.init();
     resetRun();
+    Touch.reset();
+    Tilt.calibrate();
     state = State.PLAYING;
     UI.show(null);
     $('hud').classList.remove('hidden');
@@ -1386,7 +1424,7 @@
     Save.data.bank += G.coins;
     Save.data.highScores.push({
       score: final, distance: Math.floor(G.distance), coins: G.coins,
-      character: charById(Save.data.character).name, date: Date.now(),
+      character: charById(Save.data.character).name, name: Save.data.playerName || 'Runner', date: Date.now(),
     });
     Save.data.highScores.sort((a, b) => b.score - a.score);
     Save.data.highScores = Save.data.highScores.slice(0, 10);
@@ -1527,6 +1565,7 @@
     buildChildren(child);
 
     G.turnBuffer = null;
+    P.laneTarget = null;
     Sfx.turn();
   }
 
@@ -1643,8 +1682,17 @@
     // ---- forward + lateral motion ----
     P.s += G.speed * h;
     G.distance += G.speed * h;
-    const steer = (Input.right ? 1 : 0) - (Input.left ? 1 : 0);
-    P.x = clamp(P.x + steer * CFG.STEER_SPEED * h, -CFG.LANE_LIMIT, CFG.LANE_LIMIT);
+    const steer = steerInput();
+    if (steer !== 0) {
+      P.laneTarget = null;
+      P.x += steer * CFG.STEER_SPEED * h;
+    } else if (P.laneTarget !== null) {
+      // a swipe on a straight: glide one lane over
+      const d = P.laneTarget - P.x;
+      const step = CFG.STEER_SPEED * 1.3 * h;
+      if (Math.abs(d) <= step) { P.x = P.laneTarget; P.laneTarget = null; } else P.x += Math.sign(d) * step;
+    }
+    P.x = clamp(P.x, -CFG.LANE_LIMIT, CFG.LANE_LIMIT);
 
     // ---- vertical motion / gaps ----
     const hasFloor = G.boostT > 0 || floorAt(seg, P.s, P.x);
@@ -1774,6 +1822,7 @@
 
   function updatePlaying(dt) {
     G.time += dt;
+    Touch.poll();
     if (G.dying) { updateDying(dt); updateVisuals(dt); return; }
 
     // ---- speed ----
@@ -1959,7 +2008,7 @@
     runner.root.position.copy(_pos);
     P.yawVis = damp(P.yawVis, P.yaw, 16, dt);
     runner.root.rotation.y = P.yawVis;
-    const steer = state === State.PLAYING && !G.dying ? (Input.right ? 1 : 0) - (Input.left ? 1 : 0) : 0;
+    const steer = state === State.PLAYING && !G.dying ? steerInput() : 0;
     P.lean = damp(P.lean, -steer * 0.2, 10, dt);
     runner.root.rotation.z = P.lean;
     animateRunner(dt);
@@ -2017,9 +2066,9 @@
       G.shake = Math.max(0, G.shake - dt * 1.4);
       const sh = G.shake * G.shake * 0.8; // quadratic falloff feels punchier
       camera.position.set(
-        _pos.x - fx * CFG.CAM_BACK + rand(-sh, sh),
-        G.camY + CFG.CAM_UP + rand(-sh, sh),
-        _pos.z - fz * CFG.CAM_BACK + rand(-sh, sh)
+        _pos.x - fx * View.back + rand(-sh, sh),
+        G.camY + View.up + rand(-sh, sh),
+        _pos.z - fz * View.back + rand(-sh, sh)
       );
       camera.lookAt(_pos.x + fx * 6, G.camY + 1.4, _pos.z + fz * 6);
       if (sh > 0) camera.rotateZ(rand(-1, 1) * sh * 0.08); // a little roll in the shake
@@ -2028,7 +2077,7 @@
       G.fovKick = damp(G.fovKick, 0, 2.5, dt);
       const fovBase = G.boostT > 0 ? 82 : P.grapple ? 76 : 65 + Math.min(8, (G.speed - CFG.BASE_SPEED) * 0.35);
       const fovT = fovBase + G.fovKick;
-      const nf = damp(camera.fov, fovT, 3, dt);
+      const nf = damp(camera.fov, fovT * View.fovScale, 3, dt);
       if (Math.abs(nf - camera.fov) > 0.01) { camera.fov = nf; camera.updateProjectionMatrix(); }
     }
     jungleFloor.position.x = camera.position.x;
@@ -2065,7 +2114,13 @@
   /* =======================================================================
    * 16. INPUT
    * ===================================================================== */
-  const Input = { left: false, right: false };
+  // Every steering source: keys, touch holds, on-screen buttons, device tilt.
+  const Input = { left: false, right: false, touchLeft: false, touchRight: false, btnLeft: false, btnRight: false };
+  function steerInput() {
+    const digital = ((Input.right || Input.touchRight || Input.btnRight) ? 1 : 0) - ((Input.left || Input.touchLeft || Input.btnLeft) ? 1 : 0);
+    return clamp(digital + (Tilt.enabled ? Tilt.value : 0), -1, 1);
+  }
+  const isTyping = (e) => e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA');
   const KEYMAP = {
     ArrowLeft: 'left', KeyA: 'left', ArrowRight: 'right', KeyD: 'right',
     ArrowUp: 'up', KeyW: 'up', ArrowDown: 'down', KeyS: 'down',
@@ -2074,6 +2129,7 @@
   };
 
   window.addEventListener('keydown', (e) => {
+    if (isTyping(e)) return; // typing a name in the overlay
     const a = KEYMAP[e.code];
     if (!a) return;
     if (a !== 'enter' || state === State.PLAYING) e.preventDefault();
@@ -2098,7 +2154,7 @@
         if (a === 'space' || a === 'pause' || a === 'enter') resumeGame();
         break;
       case State.START:
-        if (a === 'enter' && !$('screen-start').classList.contains('hidden')) startGame();
+        if (a === 'enter' && !$('screen-start').classList.contains('hidden')) requestStart();
         else if (a === 'pause' && $('screen-start').classList.contains('hidden')) { UI.show('screen-start'); UI.refreshMenu(); }
         break;
       case State.GAMEOVER:
@@ -2113,8 +2169,174 @@
     if (a === 'right') Input.right = false;
   });
   // Lose focus / switch tab → release keys and pause
-  window.addEventListener('blur', () => { Input.left = Input.right = false; pauseGame(); });
+  window.addEventListener('blur', () => { Input.left = Input.right = false; Touch.reset(); pauseGame(); });
   document.addEventListener('visibilitychange', () => { if (document.hidden) pauseGame(); });
+  window.addEventListener('pagehide', () => pauseGame());
+
+  /* -----------------------------------------------------------------------
+   * TOUCH GESTURES (on the canvas — the HUD above it ignores pointer events)
+   *   swipe ↑ jump · swipe ↓ slide · swipe ←/→ turn at a corner (or hop a
+   *   lane on a straight) · hold left/right half of the screen to steer ·
+   *   tap to fire the grappling hook (near a canyon) or the full power meter.
+   *   A finger that's holding can still swipe up/down to jump/slide.
+   * --------------------------------------------------------------------- */
+  const Touch = {
+    active: new Map(), // touch id → { x0, y0, t0, swiped, holding, side }
+    SWIPE_PX: 26,      // movement that counts as a swipe
+    HOLD_MS: 130,      // still for this long = a steering hold
+    TAP_MS: 250,
+    reset() { this.active.clear(); Input.touchLeft = Input.touchRight = false; },
+    updateSteer() {
+      let l = false, r = false;
+      for (const t of this.active.values()) if (t.holding) { if (t.side < 0) l = true; else r = true; }
+      Input.touchLeft = l; Input.touchRight = r;
+    },
+    /** Promote still fingers to steering holds (called every frame). */
+    poll() {
+      const now = performance.now();
+      let changed = false;
+      for (const t of this.active.values()) {
+        if (!t.holding && !t.swiped && now - t.t0 > this.HOLD_MS) { t.holding = true; changed = true; }
+      }
+      if (changed) this.updateSteer();
+    },
+  };
+
+  function swipe(dx, dy) {
+    if (Math.abs(dx) > Math.abs(dy)) {
+      const side = dx > 0 ? 1 : -1;
+      if (!tryTurn(side)) {
+        G.turnBuffer = { side, t: CFG.TURN_BUFFER }; // corner just ahead? remember it
+        const lane = clamp(Math.round(P.x / 2) * 2 + side * 2, -2, 2);
+        P.laneTarget = clamp(lane, -CFG.LANE_LIMIT, CFG.LANE_LIMIT);
+      }
+    } else if (dy < 0) jump();
+    else slide();
+  }
+
+  function onTap() {
+    if (grappleTarget()) grapple();
+    else tryActivateMeter();
+  }
+
+  canvas.addEventListener('touchstart', (e) => {
+    e.preventDefault(); // no scrolling, zooming or synthetic mouse clicks
+    Sfx.init();
+    if (state !== State.PLAYING || G.dying) return;
+    const now = performance.now();
+    for (const t of e.changedTouches) {
+      Touch.active.set(t.identifier, {
+        x0: t.clientX, y0: t.clientY, t0: now, swiped: false, holding: false,
+        side: t.clientX < window.innerWidth / 2 ? -1 : 1,
+      });
+    }
+  }, { passive: false });
+
+  canvas.addEventListener('touchmove', (e) => {
+    e.preventDefault();
+    if (state !== State.PLAYING || G.dying) return;
+    for (const t of e.changedTouches) {
+      const rec = Touch.active.get(t.identifier);
+      if (!rec) continue;
+      const dx = t.clientX - rec.x0, dy = t.clientY - rec.y0;
+      if (rec.holding) {
+        // steering finger: follow which half it's on; a vertical flick still jumps/slides
+        const side = t.clientX < window.innerWidth / 2 ? -1 : 1;
+        if (side !== rec.side) { rec.side = side; Touch.updateSteer(); }
+        if (Math.abs(dy) > Touch.SWIPE_PX * 1.5 && Math.abs(dy) > Math.abs(dx)) {
+          swipe(0, dy);
+          rec.x0 = t.clientX; rec.y0 = t.clientY;
+        }
+      } else if (!rec.swiped && Math.hypot(dx, dy) > Touch.SWIPE_PX) {
+        rec.swiped = true; // fire on move, not on release — feels much snappier
+        swipe(dx, dy);
+      }
+    }
+  }, { passive: false });
+
+  function touchEnd(e) {
+    e.preventDefault();
+    const now = performance.now();
+    for (const t of e.changedTouches) {
+      const rec = Touch.active.get(t.identifier);
+      if (!rec) continue;
+      if (e.type === 'touchend' && state === State.PLAYING && !G.dying &&
+          !rec.swiped && !rec.holding && now - rec.t0 < Touch.TAP_MS) onTap();
+      Touch.active.delete(t.identifier);
+    }
+    Touch.updateSteer();
+  }
+  canvas.addEventListener('touchend', touchEnd, { passive: false });
+  canvas.addEventListener('touchcancel', touchEnd, { passive: false });
+  canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+  // iOS Safari pinch / double-tap zoom gestures
+  document.addEventListener('gesturestart', (e) => e.preventDefault());
+  document.addEventListener('dblclick', (e) => e.preventDefault());
+
+  /* -----------------------------------------------------------------------
+   * DEVICE TILT steering (optional, Settings → Tilt steering)
+   * Uses gamma in portrait, beta in landscape; calibrated at the start of
+   * each run so whatever angle you hold the device at counts as "straight".
+   * --------------------------------------------------------------------- */
+  const Tilt = {
+    enabled: false, raw: 0, base: 0, value: 0, listening: false,
+    DEAD: 4, FULL: 20, // degrees
+    onOrientation(e) {
+      const angle = (screen.orientation && screen.orientation.angle) || window.orientation || 0;
+      let g;
+      if (angle === 90) g = e.beta;
+      else if (angle === -90 || angle === 270) g = -e.beta;
+      else if (angle === 180) g = -e.gamma;
+      else g = e.gamma;
+      if (g == null) return;
+      Tilt.raw = g;
+      const d = g - Tilt.base;
+      const m = Math.abs(d) < Tilt.DEAD ? 0 : clamp((Math.abs(d) - Tilt.DEAD) / (Tilt.FULL - Tilt.DEAD), 0, 1);
+      Tilt.value = m * Math.sign(d);
+    },
+    calibrate() { this.base = this.raw; this.value = 0; },
+    /** Must be called from a tap (iOS asks for permission). Resolves true if tilt works. */
+    async enable() {
+      if (typeof DeviceOrientationEvent === 'undefined') return false;
+      if (typeof DeviceOrientationEvent.requestPermission === 'function') {
+        try { if (await DeviceOrientationEvent.requestPermission() !== 'granted') return false; } catch (err) { return false; }
+      }
+      if (!this.listening) { window.addEventListener('deviceorientation', (e) => this.onOrientation(e)); this.listening = true; }
+      this.enabled = true;
+      return true;
+    },
+    disable() { this.enabled = false; this.value = 0; },
+  };
+
+  /* -----------------------------------------------------------------------
+   * ON-SCREEN BUTTONS (fallback when swipes fight the browser)
+   * Pointer events so they work for touch, pen and mouse alike.
+   * --------------------------------------------------------------------- */
+  function bindPress(el, down, up) {
+    el.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      Sfx.init();
+      if (el.setPointerCapture) { try { el.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ } }
+      el.classList.add('pressed');
+      if (state === State.PLAYING && !G.dying) down();
+    });
+    const end = () => { el.classList.remove('pressed'); if (up) up(); };
+    el.addEventListener('pointerup', end);
+    el.addEventListener('pointercancel', end);
+    el.addEventListener('lostpointercapture', end);
+  }
+  bindPress($('tc-left'), () => { Input.btnLeft = true; onTurnKey(-1); }, () => { Input.btnLeft = false; });
+  bindPress($('tc-right'), () => { Input.btnRight = true; onTurnKey(1); }, () => { Input.btnRight = false; });
+  bindPress($('tc-jump'), () => jump());
+  bindPress($('tc-slide'), () => slide());
+  bindPress($('grapple-prompt'), () => grapple());
+  bindPress($('meter-wrap'), () => tryActivateMeter());
+
+  const touchButtonsOn = () => (Save.data.touchButtons === null ? IS_TOUCH : Save.data.touchButtons);
+  function applyControlPrefs() {
+    document.body.classList.toggle('touch-buttons', touchButtonsOn());
+  }
 
   /* =======================================================================
    * 17. UI (menus + HUD)
@@ -2191,6 +2413,32 @@
 
     updateMuteButton() {
       $('btn-mute').textContent = Save.data.muted ? '🔇 Sound: Off' : '🔊 Sound: On';
+    },
+
+    renderSettings() {
+      $('set-name').textContent = Save.data.playerName || '—';
+      $('set-buttons').textContent = touchButtonsOn() ? 'On' : 'Off';
+      $('set-tilt').textContent = Tilt.enabled ? 'On' : 'Off';
+      $('set-sound').textContent = Save.data.muted ? 'Off' : 'On';
+      $('set-buttons').parentElement.classList.toggle('on', touchButtonsOn());
+      $('set-tilt').parentElement.classList.toggle('on', Tilt.enabled);
+      $('set-sound').parentElement.classList.toggle('on', !Save.data.muted);
+    },
+
+    /** Name overlay: `thenStart` = shown from Start (run begins after saving). */
+    showNameOverlay(thenStart) {
+      this.nameThenStart = thenStart;
+      this.nameReturn = thenStart ? 'screen-start' : 'screen-settings';
+      const input = $('name-input');
+      input.value = Save.data.playerName || '';
+      this.show('screen-name');
+      // On touch devices focusing pops the keyboard over the panel; let the player tap instead.
+      if (!IS_TOUCH) setTimeout(() => input.focus(), 30);
+    },
+    closeNameOverlay() {
+      $('name-input').blur();
+      if (this.nameThenStart) startGame();
+      else { this.renderSettings(); this.show(this.nameReturn); }
     },
 
     renderCharacters() {
@@ -2280,7 +2528,7 @@
       const body = $('score-body');
       const hs = Save.data.highScores;
       body.innerHTML = hs.length
-        ? hs.map((h, i) => `<tr><td>${i + 1}</td><td>${h.score.toLocaleString()}</td><td>${h.distance.toLocaleString()} m</td><td>${h.coins}</td><td>${h.character}</td></tr>`).join('')
+        ? hs.map((h, i) => `<tr><td>${i + 1}</td><td>${h.score.toLocaleString()}</td><td>${h.distance.toLocaleString()} m</td><td>${h.coins}</td><td>${escapeHTML(h.name || 'Runner')}<small class="muted"> · ${escapeHTML(h.character)}</small></td></tr>`).join('')
         : '<tr><td colspan="5" style="color:var(--muted)">No runs yet — go set a record!</td></tr>';
     },
   };
@@ -2292,7 +2540,20 @@
     Sfx.init();
     Sfx.click();
     switch (btn.dataset.action) {
-      case 'start': startGame(); break;
+      case 'start': requestStart(); break;
+      case 'settings': UI.renderSettings(); UI.show('screen-settings'); break;
+      case 'toggle-buttons': Save.data.touchButtons = !touchButtonsOn(); Save.save(); applyControlPrefs(); UI.renderSettings(); break;
+      case 'toggle-tilt':
+        if (Tilt.enabled) { Tilt.disable(); Save.data.tilt = false; Save.save(); UI.renderSettings(); }
+        else {
+          Tilt.enable().then((ok) => {
+            Save.data.tilt = ok; Save.save(); UI.renderSettings();
+            if (!ok) UI.toast('Tilt not available on this device');
+          });
+        }
+        break;
+      case 'edit-name': UI.showNameOverlay(false); break;
+      case 'name-skip': Save.data.playerName = Save.data.playerName || 'Runner'; Save.save(); UI.closeNameOverlay(); break;
       case 'characters': UI.renderCharacters(); UI.show('screen-characters'); break;
       case 'upgrades': UI.renderUpgrades(); UI.show('screen-upgrades'); break;
       case 'scores': UI.renderScores(); UI.show('screen-scores'); break;
@@ -2304,7 +2565,7 @@
       case 'resume': resumeGame(); break;
       case 'restart': startGame(); break;
       case 'menu': goToMenu(); break;
-      case 'toggle-mute': Sfx.setMuted(!Save.data.muted); UI.updateMuteButton(); break;
+      case 'toggle-mute': Sfx.setMuted(!Save.data.muted); UI.updateMuteButton(); UI.renderSettings(); break;
     }
     btn.blur(); // so Space/Enter don't re-trigger the focused button
   });
@@ -2335,8 +2596,24 @@
 
   // Optional debug handle (open index.html?debug) for testing in the console.
   if (/[?&]debug\b/.test(location.search)) {
-    window.__ruins = { G, P, CFG, Input, getState: () => state, startGame, jump, slide, onTurnKey, activatePower, stumble, grapple, grappleTarget };
+    window.__ruins = { G, P, CFG, Input, getState: () => state, startGame, jump, slide, onTurnKey, activatePower, stumble, grapple, grappleTarget, Touch, Tilt, View };
   }
+
+  // Name overlay form (Enter or the button submits)
+  $('name-form').addEventListener('submit', (e) => {
+    e.preventDefault();
+    const name = $('name-input').value.trim().replace(/\s+/g, ' ').slice(0, 14);
+    Save.data.playerName = name || 'Runner';
+    Save.save();
+    Sfx.init(); Sfx.click();
+    UI.closeNameOverlay();
+  });
+
+  // Restore control preferences (tilt needs a fresh permission tap on iOS, so
+  // it's re-enabled silently only where no permission prompt is required).
+  applyControlPrefs();
+  if (Save.data.tilt && typeof DeviceOrientationEvent !== 'undefined' &&
+      typeof DeviceOrientationEvent.requestPermission !== 'function') Tilt.enable();
 
   // Boot: build the menu backdrop and show the start screen.
   resetRun();

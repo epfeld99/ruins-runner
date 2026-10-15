@@ -20,6 +20,20 @@ It runs entirely in the browser: plain HTML, CSS and JavaScript, with no build s
 | `M` | Mute |
 | `Enter` | Start / play again |
 
+### Touch (phones & tablets — iOS and Android)
+
+| Gesture | Action |
+| --- | --- |
+| Swipe up / down | Jump / slide |
+| Swipe left / right | Turn at a corner (on a straight: hop one lane) |
+| Hold the left / right half of the screen | Steer (a flick up/down while holding still jumps/slides) |
+| Tap | Fire the grappling hook near a canyon, or use the full power meter |
+| Tap the meter / ❚❚ button | Use power / pause |
+
+**Settings → On-screen buttons** shows ◀ ▶ ▲ ▼ pads. They're on by default on touch devices, as a fallback in case swipes fight the browser. **Settings → Tilt steering** lets you lean the device to shift lanes; iOS asks for motion permission, and the tilt is re-calibrated at the start of each run. The game works in both portrait and landscape: in portrait the camera widens its view and pulls back so all three lanes stay visible. Browser pinch-zoom, double-tap zoom, pull-to-refresh and page scrolling are all blocked during play.
+
+The first time you start a run, the game asks for your name for the high score board. You can change it in Settings.
+
 ## Gameplay
 
 - **Track:** generated forever as straights joined by left, right and T-split junctions. Your speed rises with distance.
@@ -41,7 +55,7 @@ It runs entirely in the browser: plain HTML, CSS and JavaScript, with no build s
   - ⚡ **Boost:** a burst of speed for 5s or more. You smash through obstacles, float over gaps and take corners automatically.
   - 🛡️ **Shield:** absorbs one fatal hit, fall or catch.
 - **Score** = distance × multiplier + coin points.
-- **Persistence:** high scores, banked coins, upgrades and unlocked characters are saved in `localStorage`.
+- **Persistence:** high scores (with your name), banked coins, upgrades, unlocked characters and settings are saved in `localStorage`, per browser and per device.
 
 ## Menus
 
